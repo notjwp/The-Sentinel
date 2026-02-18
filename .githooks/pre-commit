@@ -1,0 +1,10 @@
+#!/bin/sh
+
+# Non-blocking reminder to keep project context fresh.
+if git diff --cached --name-only | grep -q '^PROJECT_CONTEXT.md$'; then
+  exit 0
+fi
+
+echo "[Context Reminder] PROJECT_CONTEXT.md was not updated in this commit."
+echo "If changes are meaningful, add a short log entry before pushing."
+exit 0
