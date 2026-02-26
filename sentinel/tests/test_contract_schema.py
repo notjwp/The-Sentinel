@@ -10,6 +10,8 @@ EXPECTED_KEYS = {
     "maintainability",
     "security_findings_count",
     "security",
+    "semantic_findings_count",
+    "semantic",
 }
 
 
@@ -30,6 +32,11 @@ def test_risk_contract_schema_keys_and_types_are_stable():
     assert set(contract["security"].keys()) == {"findings", "severity"}
     assert type(contract["security"]["severity"]) is SeverityLevel
     assert isinstance(contract["security"]["findings"], list)
+    assert type(contract["semantic_findings_count"]) is int
+    assert type(contract["semantic"]) is dict
+    assert set(contract["semantic"].keys()) == {"findings", "severity"}
+    assert type(contract["semantic"]["severity"]) is SeverityLevel
+    assert isinstance(contract["semantic"]["findings"], list)
 
 
 def test_debt_metrics_have_no_unexpected_keys():
@@ -44,6 +51,8 @@ def test_contract_has_no_extra_keys():
         "maintainability",
         "security",
         "security_findings_count",
+        "semantic",
+        "semantic_findings_count",
         "severity",
     ]
 

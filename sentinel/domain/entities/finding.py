@@ -8,3 +8,5 @@ class Finding:
     rule: str
     match: str
     severity: SeverityLevel
+    finding_type: str = "security"
+    similarity_score: float | None = None
