@@ -7,7 +7,7 @@ This file tracks ongoing project context, decisions, and recent actions so work 
 - **Project:** The-Sentinel
 - **Root Path:** `D:\Dev\The-Sentinel`
 - **Date Initialized:** 2026-02-16
-- **Last Updated:** 2026-03-03
+- **Last Updated:** 2026-03-07
 - **Python:** 3.13.5
 - **Virtual Environment:** `D:\Dev\The-Sentinel\venv\`
 
@@ -137,8 +137,12 @@ sentinel/
 ## Mutation Testing
 
 Configured in `pyproject.toml` under `[tool.mutmut]`:
-- **Targets:** `sentinel/domain/`, `sentinel/application/`, `sentinel/infrastructure/`
-- **Runner:** `python -m pytest -x --tb=short`
+- **Targets:** `sentinel/domain/`
+- **Tests Dir:** `sentinel/tests/`
+- **Also Copy:** `sentinel/`, `main.py` (needed for mutmut 3.x `mutants/` directory)
+- **Backup:** `false`
+- **Docker:** `mutation.Dockerfile` — builds image, runs tests at build time, then `mutmut run`
+- **Last Run:** 216 mutants generated, 176 killed, 40 survived, 0 errors
 
 ## Commands
 
@@ -162,6 +166,10 @@ mutmut results
 # Mutation testing (Docker)
 docker build -f mutation.Dockerfile -t sentinel-mutmut .
 docker run --rm sentinel-mutmut
+
+# Mutation testing (Docker with persistent results)
+docker run --rm -v sentinel-mutmut-data:/app sentinel-mutmut
+docker run --rm -v sentinel-mutmut-data:/app sentinel-mutmut results
 ```
 
 ## Working Log
@@ -198,6 +206,15 @@ docker run --rm sentinel-mutmut
 ### 2026-03-03
 - Created `mutation.Dockerfile` for containerized mutation testing.
 - Updated PROJECT_CONTEXT.md and README.md to reflect Docker usage.
+
+### 2026-03-07
+- Fixed mutmut 3.x compatibility: `paths_to_mutate`, `tests_dir` must be TOML arrays, not strings.
+- Added `also_copy = ["sentinel/", "main.py"]` so mutmut copies full package tree to `mutants/` directory.
+- Added `pip install -e .` to `mutation.Dockerfile` so imports resolve in `mutants/` working directory.
+- Relaxed regex stability test thresholds from 0.1s to 0.5s (`_THRESHOLD` constant) for Docker/CI tolerance.
+- Regenerated OpenAPI snapshot after FastAPI version change.
+- Mutation run complete: 216 mutants, 176 killed, 40 survived, 0 errors.
+- Updated PROJECT_CONTEXT.md, README.md, and requirements.txt.
 
 ## Open Items
 

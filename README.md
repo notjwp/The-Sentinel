@@ -118,7 +118,12 @@ Mutation testing can be run locally or via the provided Dockerfile.
 ```bash
 docker build -f mutation.Dockerfile -t sentinel-mutmut .
 docker run --rm sentinel-mutmut
-docker run --rm sentinel-mutmut results
+```
+
+To persist results across container runs, mount a volume:
+```bash
+docker run --rm -v sentinel-mutmut-data:/app sentinel-mutmut
+docker run --rm -v sentinel-mutmut-data:/app sentinel-mutmut results
 ```
 
 ### Local Workstation

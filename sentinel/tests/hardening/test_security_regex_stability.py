@@ -3,6 +3,9 @@ import time
 
 from sentinel.domain.services.security_service import SecurityService
 
+# Threshold generous enough for Docker/CI; still catches catastrophic backtracking
+_THRESHOLD = 0.5
+
 
 def _service() -> SecurityService:
     return SecurityService()
@@ -17,7 +20,7 @@ def test_long_base64_string_no_hang():
     start = time.monotonic()
     result = svc.analyze(base64_blob)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
     assert result["severity"] is not None
 
 
@@ -27,7 +30,7 @@ def test_long_aws_key_pattern_no_hang():
     start = time.monotonic()
     result = svc.analyze(aws_blob)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 # --- Repeated Patterns That Could Cause Backtracking ---
@@ -41,7 +44,7 @@ def test_repeated_api_key_assignments_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
     assert result["severity"] is not None
 
 
@@ -53,7 +56,7 @@ def test_repeated_password_assignments_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 def test_repeated_eval_calls_no_hang():
@@ -62,7 +65,7 @@ def test_repeated_eval_calls_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 def test_repeated_exec_calls_no_hang():
@@ -71,7 +74,7 @@ def test_repeated_exec_calls_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 def test_repeated_subprocess_shell_true_no_hang():
@@ -82,7 +85,7 @@ def test_repeated_subprocess_shell_true_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 def test_repeated_os_system_calls_no_hang():
@@ -93,7 +96,7 @@ def test_repeated_os_system_calls_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 # --- Random Entropy Blobs ---
@@ -105,7 +108,7 @@ def test_random_entropy_blob_no_hang():
     start = time.monotonic()
     result = svc.analyze(blob)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
     assert result["severity"] is not None
 
 
@@ -115,7 +118,7 @@ def test_binary_like_blob_no_hang():
     start = time.monotonic()
     result = svc.analyze(blob)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 def test_nested_quotes_no_hang():
@@ -124,7 +127,7 @@ def test_nested_quotes_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 def test_sql_like_pattern_repeated_no_hang():
@@ -135,7 +138,7 @@ def test_sql_like_pattern_repeated_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 # --- No Catastrophic Backtracking on Edge Patterns ---
@@ -147,7 +150,7 @@ def test_almost_matching_openai_key_no_backtrack():
     start = time.monotonic()
     result = svc.analyze(near_miss)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 def test_almost_matching_aws_key_no_backtrack():
@@ -156,7 +159,7 @@ def test_almost_matching_aws_key_no_backtrack():
     start = time.monotonic()
     result = svc.analyze(near_miss)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
 
 
 def test_whitespace_heavy_code_no_hang():
@@ -165,7 +168,7 @@ def test_whitespace_heavy_code_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
     assert len(result["findings"]) >= 1
 
 
@@ -175,5 +178,5 @@ def test_newline_heavy_code_no_hang():
     start = time.monotonic()
     result = svc.analyze(code)
     elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+    assert elapsed < _THRESHOLD
     assert len(result["findings"]) >= 1

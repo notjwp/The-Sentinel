@@ -1,12 +1,12 @@
 # Core
-fastapi==0.129.2
-uvicorn[standard]==0.34.0
-scikit-learn==1.8.0
+fastapi==0.121.0
+uvicorn[standard]==0.38.0
+scikit-learn==1.7.2
 
 # Testing
-pytest==8.3.5
+pytest==9.0.2
 pytest-cov==7.0.0
 httpx==0.28.1
 
 # Mutation testing
-mutmut==3.4.0
+mutmut==3.5.0

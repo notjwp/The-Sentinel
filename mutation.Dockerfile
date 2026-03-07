@@ -19,9 +19,12 @@ COPY pyproject.toml .
 COPY main.py .
 COPY sentinel/ sentinel/
 
+# Install project so imports resolve correctly
+RUN pip install --no-cache-dir -e .
+
 # Verify tests pass before mutating
 RUN python -m pytest -x --tb=short -q
 
 # Default: run mutmut against domain/application/infrastructure
 ENTRYPOINT ["mutmut"]
-CMD ["run", "--no-progress"]
+CMD ["run"]

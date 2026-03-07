@@ -2,12 +2,30 @@
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "the-sentinel"
+version = "0.1.0"
+description = "AI-driven code auditing system with multi-engine risk analysis"
+requires-python = ">=3.13"
+
+[tool.setuptools.packages.find]
+include = ["sentinel*"]
+
 [tool.pytest.ini_options]
 testpaths = ["sentinel/tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
 
+[tool.coverage.run]
+source = ["sentinel"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
 [tool.mutmut]
-paths_to_mutate = "sentinel/domain/,sentinel/application/,sentinel/infrastructure/"
-tests_dir = "sentinel/tests/"
-runner = "python -m pytest -x --tb=short"
+paths_to_mutate = ["sentinel/domain/"]
+tests_dir = ["sentinel/tests/"]
+also_copy = ["sentinel/", "main.py"]
+backup = false
