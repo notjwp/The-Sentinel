@@ -19,6 +19,7 @@ addopts = "-q"
 [tool.coverage.run]
 source = ["sentinel"]
 branch = true
+omit = ["sentinel/tests/*"]
 
 [tool.coverage.report]
 show_missing = true

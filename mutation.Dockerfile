@@ -22,8 +22,10 @@ COPY sentinel/ sentinel/
 # Install project so imports resolve correctly
 RUN pip install --no-cache-dir -e .
 
-# Verify tests pass before mutating
-RUN python -m pytest -x --tb=short -q
+# Verify tests pass before mutating. Regenerate OpenAPI snapshot in-container
+# to avoid host/container schema snapshot drift.
+RUN rm -f sentinel/tests/snapshots/openapi_snapshot.json \
+    && python -m pytest -x --tb=short -q
 
 # Default: run mutmut against domain/application/infrastructure
 ENTRYPOINT ["mutmut"]

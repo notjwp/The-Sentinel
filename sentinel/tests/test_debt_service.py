@@ -120,6 +120,25 @@ def test_maintainability_always_clamped_between_zero_and_hundred():
     assert 0 <= high_input <= 100
 
 
+def test_maintainability_formula_exact_values():
+    service = DebtService()
+    assert service.calculate_maintainability(complexity=1, loc=1) == 94.9
+    assert service.calculate_maintainability(complexity=10, loc=100) == 40.0
+    assert service.calculate_maintainability(complexity=0, loc=0) == 100.0
+
+
+def test_maintainability_clamps_hard_bounds_exactly():
+    service = DebtService()
+    assert service.calculate_maintainability(complexity=10_000, loc=10_000) == 0.0
+    assert service.calculate_maintainability(complexity=-100, loc=-100) == 100.0
+
+
+def test_calculate_complexity_counts_all_decision_keywords_exactly():
+    code = "if elif for while except and or case"
+    complexity = DebtService().calculate_complexity(code)
+    assert complexity == 9
+
+
 def test_evaluate_debt_deterministic_for_100_runs():
     service = DebtService()
     code = _load_fixture("medium_function.py")

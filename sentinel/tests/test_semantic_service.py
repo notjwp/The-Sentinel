@@ -193,6 +193,37 @@ def test_threshold_renamed_vars_above_threshold_flagged():
     assert findings[0].severity == SeverityLevel.HIGH
 
 
+def test_threshold_is_strictly_greater_than_not_equal(monkeypatch):
+    svc = _service()
+
+    monkeypatch.setattr(
+        svc,
+        "compute_similarity",
+        lambda vec1, vec2: svc.SIMILARITY_THRESHOLD,
+    )
+
+    findings = svc.detect_duplicates("def x(): return 1", ["def y(): return 1"])
+    assert findings == []
+
+
+def test_detect_duplicates_uses_non_empty_existing_code_only(monkeypatch):
+    svc = _service()
+    calls: list[str] = []
+
+    original = svc.generate_embedding
+
+    def _spy(tokens: list[str]) -> list[float]:
+        text = " ".join(tokens)
+        calls.append(text)
+        return original(tokens)
+
+    monkeypatch.setattr(svc, "generate_embedding", _spy)
+    svc.detect_duplicates("def x(): return 1", ["   ", "", "def y(): return 1"])
+
+    # One call for new_code + one for the only valid existing code.
+    assert len(calls) == 2
+
+
 # --- detect_duplicates Edge Cases ---
 
 

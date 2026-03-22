@@ -12,8 +12,11 @@ from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.api.webhook_controller import router as webhook_router
 from sentinel.api.webhook_controller import get_orchestrator
 from sentinel.api.health_controller import router as health_router
+from sentinel.monitoring.logger import get_logger
 from sentinel.workers.background_worker import BackgroundWorker
 from sentinel.workers.job_queue import JobQueue
+
+logger = get_logger(__name__)
 
 app = FastAPI(title="The Sentinel")
 
@@ -29,7 +32,7 @@ app.include_router(health_router)
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    print("Starting background worker...", flush=True)
+    logger.info("Starting background worker")
     app.state.worker_task = asyncio.create_task(background_worker.start())
 
 @app.get("/")
