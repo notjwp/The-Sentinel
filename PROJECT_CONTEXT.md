@@ -7,7 +7,7 @@ This file tracks ongoing project context, decisions, and recent actions so work 
 - **Project:** The-Sentinel
 - **Root Path:** `D:\Dev\The-Sentinel`
 - **Date Initialized:** 2026-02-16
-- **Last Updated:** 2026-03-07
+- **Last Updated:** 2026-03-24
 - **Python:** 3.13.5
 - **Virtual Environment:** `D:\Dev\The-Sentinel\venv\`
 
@@ -23,18 +23,29 @@ The Sentinel is an event-driven FastAPI code auditing system using **Clean Archi
 | **API** | `sentinel/api/` | FastAPI controllers (webhook, health) |
 | **Workers** | `sentinel/workers/` | Async background job processing |
 
+### Phase Status
+
+- **Phase 1:** System stabilization and hardening complete
+- **Phase 2:** Vulnerability classification complete (OWASP mapping + CRITICAL severity)
+- **Phase 3:** Optional LLM explanation/fix suggestion integration complete with failure-safe fallbacks
+
 ### Analysis Engines
 
 | Engine | Module | Purpose |
 |---|---|---|
 | **Technical Debt** | `sentinel/domain/services/debt_service.py` | Cyclomatic complexity, line count, nesting depth |
-| **Security** | `sentinel/domain/services/security_service.py` | Regex-based vulnerability pattern detection |
+| **Security** | `sentinel/domain/services/security_service.py` | Regex-based vulnerability detection + OWASP/category classification |
 | **Semantic** | `sentinel/domain/services/semantic_service.py` | Duplicate/similar code detection via embeddings |
+| **LLM Explanation/Fix (optional)** | `sentinel/infrastructure/llm/` | Pluggable provider interface + safe wrapper for explanation/fix generation |
 
 ### Pipeline
 
 ```
-Webhook → AuditOrchestrator → JobQueue → BackgroundWorker → ProcessPullRequestUseCase → RiskEngine (debt + security + semantic) → ReportService
+Webhook → (optional synchronous security/risk path for code payload)
+  → AuditOrchestrator → JobQueue → BackgroundWorker → ProcessPullRequestUseCase
+  → RiskEngine (debt + security + semantic) → ReportService
+
+Detection → Classification → (optional) Explanation/Fix Suggestion → Risk
 ```
 
 ## Current Structure
@@ -48,28 +59,36 @@ PROJECT_CONTEXT.md                       # This file
 mutation.Dockerfile                      # Docker configuration for mutmut
 sentinel/
 ├── __init__.py
+├── config/
+│   ├── __init__.py
+│   └── settings.py                      # Runtime flags for optional LLM behavior
 ├── api/
 │   ├── health_controller.py             # GET /health
-│   └── webhook_controller.py            # POST /webhook
+│   └── webhook_controller.py            # POST /webhook (queued mode + sync mode)
 ├── application/
 │   ├── __init__.py
-│   ├── audit_orchestrator.py            # Enqueues jobs from webhook events
+│   ├── audit_orchestrator.py            # Enqueues jobs + optional finding enrichment hook
 │   ├── report_service.py                # Formats risk assessment reports
 │   ├── risk_engine.py                   # Multi-engine risk aggregator
 │   └── use_cases/
 │       └── process_pull_request.py      # PR processing use case
 ├── domain/
 │   ├── entities/
-│   │   ├── finding.py                   # Finding dataclass (security + semantic)
+│   │   ├── finding.py                   # Finding dataclass (+ classification + optional explanation/fix)
 │   │   └── pull_request.py              # PullRequest entity
 │   ├── services/
 │   │   ├── debt_service.py              # Technical debt analysis
 │   │   ├── security_service.py          # Security vulnerability scanning
 │   │   └── semantic_service.py          # Semantic similarity detection
 │   └── value_objects/
-│       └── severity_level.py            # SeverityLevel enum (LOW/MEDIUM/HIGH)
+│       └── severity_level.py            # SeverityLevel enum (LOW/MEDIUM/HIGH/CRITICAL)
 ├── infrastructure/
 │   ├── __init__.py
+│   ├── llm/
+│   │   ├── __init__.py
+│   │   ├── base.py                      # LLMProvider abstraction
+│   │   ├── llm_service.py               # Safe wrapper (limits, fallbacks)
+│   │   └── openai_provider.py           # OpenAI implementation (optional runtime dependency)
 │   └── semantic/
 │       ├── __init__.py
 │       └── embedding_engine.py          # sklearn HashingVectorizer (128-dim, L2-norm)
@@ -92,11 +111,15 @@ sentinel/
 │   ├── snapshots/                       # OpenAPI schema snapshots
 │   ├── test_contract_schema.py
 │   ├── test_debt_service.py
+│   ├── test_llm_integration.py
+│   ├── test_risk_engine_security_integration.py
 │   ├── test_risk_engine.py
+│   ├── test_security_edge_cases.py
 │   ├── test_security_service.py
 │   ├── test_semantic_integration.py
 │   ├── test_semantic_service.py
 │   ├── test_use_case.py
+│   ├── test_vulnerability_classification.py
 │   └── test_webhook_api.py
 └── workers/
     ├── __init__.py
@@ -110,15 +133,16 @@ sentinel/
 - **Semantic Threshold:** 0.9 cosine similarity for duplicate detection
 - **Domain Purity:** Domain layer has zero imports from FastAPI, sklearn, or infrastructure
 - **EmbeddingPort Protocol:** Domain defines a Protocol; infrastructure implements it (Dependency Inversion)
-- **Risk Aggregation:** Semantic HIGH → overall HIGH, then security HIGH, then debt HIGH, then MEDIUM check, else LOW
-- **Finding Entity:** `@dataclass(frozen=True)` with `rule`, `match`, `severity`, `finding_type` (security/semantic), `similarity_score`
+- **Risk Aggregation:** CRITICAL security finding forces overall CRITICAL; otherwise semantic/security/debt precedence applies
+- **Security Classification:** Rule mapping includes category + OWASP labels with unknown fallback values
+- **Finding Entity:** `@dataclass(frozen=True)` with optional `explanation` and `fix_suggestion` fields for downstream AI outputs
+- **LLM Integration Safety:** Optional via env flags; disabled by default; safe fallback strings prevent pipeline failure
 
 ## Test Suite
 
-- **Total tests:** 239
-- **Runtime:** ~11s
-- **Branch coverage:** 99%
-- **Test files:** 8 root + 9 hardening = 17 total
+- **Status:** Full suite passing (`python -m pytest -q`)
+- **Coverage:** 100% branch coverage observed in recent runs
+- **Phase additions:** Security classification tests + LLM integration tests added
 
 ### Hardening Tests
 
@@ -137,12 +161,12 @@ sentinel/
 ## Mutation Testing
 
 Configured in `pyproject.toml` under `[tool.mutmut]`:
-- **Targets:** `sentinel/domain/`
+- **Targets:** `sentinel/domain/`, `sentinel/application/`, `sentinel/infrastructure/`
 - **Tests Dir:** `sentinel/tests/`
 - **Also Copy:** `sentinel/`, `main.py` (needed for mutmut 3.x `mutants/` directory)
 - **Backup:** `false`
 - **Docker:** `mutation.Dockerfile` — builds image, runs tests at build time, then `mutmut run`
-- **Last Run:** 216 mutants generated, 176 killed, 40 survived, 0 errors
+- **Current Note:** Use Docker volume mode for persistent mutmut result analysis
 
 ## Commands
 
@@ -158,6 +182,12 @@ uvicorn main:app --reload
 pytest -x
 pytest --cov=sentinel --cov-branch --cov-report=term-missing
 pytest sentinel/tests/hardening/ -v
+
+# LLM feature toggles (.env)
+# ENABLE_LLM=true
+# OPENAI_API_KEY=<your-key>
+# LLM_MAX_CALLS=5
+# LLM_TIMEOUT=8.0
 
 # Mutation testing (Local)
 mutmut run
@@ -215,6 +245,27 @@ docker run --rm -v sentinel-mutmut-data:/app sentinel-mutmut results
 - Regenerated OpenAPI snapshot after FastAPI version change.
 - Mutation run complete: 216 mutants, 176 killed, 40 survived, 0 errors.
 - Updated PROJECT_CONTEXT.md, README.md, and requirements.txt.
+
+### 2026-03-24
+- Implemented Phase 2 vulnerability classification refinements:
+  - Security findings enriched with category, OWASP mapping, structured metadata, and CRITICAL severity handling.
+  - Risk engine updated to respect CRITICAL precedence while preserving prior behavior.
+- Implemented Phase 3 optional LLM integration:
+  - Added pluggable provider abstraction (`LLMProvider`) and optional OpenAI provider in infrastructure.
+  - Added safe `LLMService` wrapper with severity filtering, call budgeting, and hard fallbacks.
+  - Added orchestrator enrichment hook for HIGH/CRITICAL findings only.
+  - Extended webhook synchronous response to include `explanation` and `fix_suggestion` fields.
+- Added and validated tests:
+  - `test_vulnerability_classification.py`
+  - `test_security_edge_cases.py`
+  - `test_risk_engine_security_integration.py`
+  - `test_llm_integration.py`
+- Added configuration/dependency support:
+  - `.env` support variables for LLM behavior
+  - `openai` and `python-dotenv` dependencies
+- Commands run:
+  - `python -m pytest -q`
+  - `python -m pytest --cov=sentinel -q`
 
 ## Open Items
 

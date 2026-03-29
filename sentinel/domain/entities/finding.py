@@ -16,6 +16,8 @@ class Finding:
     file: str | None = None
     line: int | None = None
     recommendation: str | None = None
+    fix_suggestion: str | None = None
+    explanation: str | None = None
 
     @property
     def type(self) -> str:

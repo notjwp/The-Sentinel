@@ -5,6 +5,9 @@ LABEL project="the-sentinel"
 
 WORKDIR /app
 
+# Keep optional LLM features disabled by default in mutation runs.
+ENV ENABLE_LLM=false
+
 # Install system deps (gcc needed for scikit-learn wheel fallback)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc && \
