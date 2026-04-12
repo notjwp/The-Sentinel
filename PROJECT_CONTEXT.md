@@ -28,6 +28,7 @@ The Sentinel is an event-driven FastAPI code auditing system using **Clean Archi
 - **Phase 1:** System stabilization and hardening complete
 - **Phase 2:** Vulnerability classification complete (OWASP mapping + CRITICAL severity)
 - **Phase 3:** Optional LLM explanation/fix suggestion integration complete with failure-safe fallbacks
+- **Phase 4:** Deployment and integration layer complete (GitHub webhook parsing, report formatting, translation, document review, optional PR commenting)
 
 ### Analysis Engines
 
@@ -258,6 +259,27 @@ docker run --rm -v sentinel-mutmut-data:/app sentinel-mutmut results
 - Added and validated tests:
   - `test_vulnerability_classification.py`
   - `test_security_edge_cases.py`
+
+### 2026-04-07
+- Implemented Phase 4 GitHub-native integration path with optional feature flags and failure-safe behavior.
+- Added infrastructure modules:
+  - `sentinel/infrastructure/github/github_client.py` (GitHub App JWT + installation token + PR comment posting)
+  - `sentinel/infrastructure/translation/translator.py` (LLM-backed report translation)
+- Added document review engine:
+  - `sentinel/domain/services/document_service.py` (rule-based docs checks + optional LLM clarity review)
+- Upgraded orchestration and API flow:
+  - `sentinel/application/audit_orchestrator.py` now supports document findings, report generation, and translation orchestration.
+  - `sentinel/api/webhook_controller.py` now parses GitHub-style payloads, builds markdown reports, conditionally posts PR comments, and preserves queued fallback behavior.
+  - `sentinel/application/report_service.py` now includes `format_report(...)` for structured markdown output.
+- Extended configuration:
+  - Added `ENABLE_GITHUB`, `ENABLE_TRANSLATION`, `ENABLE_DOC_REVIEW`, `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY`, `GITHUB_API_BASE_URL` in `sentinel/config/settings.py`.
+- Added dependency:
+  - `PyJWT[crypto]` in `requirements.txt` for RS256 app JWT generation.
+- Added test coverage for Phase 4 features:
+  - `test_document_service.py`
+  - `test_translator.py`
+  - `test_github_client.py`
+  - `test_webhook_phase4_integration.py`
   - `test_risk_engine_security_integration.py`
   - `test_llm_integration.py`
 - Added configuration/dependency support:

@@ -45,7 +45,7 @@ class LLMService:
             return False
         if self.call_count >= self.max_calls:
             return False
-        return self._severity_name(severity) in {"HIGH", "CRITICAL"}
+        return self._severity_name(severity) in {"MEDIUM", "HIGH", "CRITICAL"}
 
     def generate_fix_safe(
         self,

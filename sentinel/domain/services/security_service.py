@@ -35,6 +35,26 @@ class SecurityService:
         ),
     }
 
+    SQL_INJECTION_SPEC = _RuleSpec(
+        rule="sql_injection",
+        pattern="",
+        severity=SeverityLevel.CRITICAL,
+        vulnerability_type="sql_injection",
+        description="Dynamic SQL query interpolation detected.",
+        recommendation="Use parameterized queries with bound parameters.",
+    )
+    NAIVE_SQL_CONCAT_SPEC = _RuleSpec(
+        rule="naive_sql_concat",
+        pattern="",
+        severity=SeverityLevel.MEDIUM,
+        vulnerability_type="sql_injection",
+        description="SQL query built via string concatenation detected.",
+        recommendation="Use parameterized statements instead of string concatenation.",
+    )
+
+    SQL_WORD_RE = re.compile(r"\b(select|insert|update|delete)\b", re.IGNORECASE)
+    SQL_STRUCTURE_RE = re.compile(r"\b(from|where|into|set|values|union)\b", re.IGNORECASE)
+
     RULES: tuple[_RuleSpec, ...] = (
         _RuleSpec(
             rule="openai_key",
@@ -67,14 +87,6 @@ class SecurityService:
             vulnerability_type="hardcoded_secret",
             description="Possible hardcoded password assignment detected.",
             recommendation="Store passwords outside source code and use secure secret injection.",
-        ),
-        _RuleSpec(
-            rule="sql_injection",
-            pattern=r"f[\"'][^\"'\n]*SELECT\s+[^\n]*\{[^}\n]+\}[^\n\"']*[\"']",
-            severity=SeverityLevel.CRITICAL,
-            vulnerability_type="sql_injection",
-            description="Dynamic SQL query interpolation detected.",
-            recommendation="Use parameterized queries with bound parameters.",
         ),
         _RuleSpec(
             rule="command_injection",
@@ -116,14 +128,6 @@ class SecurityService:
             description="subprocess usage with shell=True increases injection risk.",
             recommendation="Set shell=False and pass command arguments as a list.",
         ),
-        _RuleSpec(
-            rule="naive_sql_concat",
-            pattern=r"SELECT\s+[^\n]*\s+FROM\s+[^\n]*\+",
-            severity=SeverityLevel.MEDIUM,
-            vulnerability_type="sql_injection",
-            description="SQL query built via string concatenation detected.",
-            recommendation="Use parameterized statements instead of string concatenation.",
-        ),
     )
     COMPILED_RULES: tuple[tuple[_RuleSpec, re.Pattern[str]], ...] = tuple(
         (spec, re.compile(spec.pattern)) for spec in RULES
@@ -133,14 +137,59 @@ class SecurityService:
         "aws_access_key": ("AKIA",),
         "api_key_assignment": ("api_key",),
         "password_assignment": ("password",),
-        "sql_injection": ("SELECT", "f\"", "f'"),
         "command_injection": ("os.system(", "subprocess."),
         "eval_call": ("eval(",),
         "exec_call": ("exec(",),
         "os_system_call": ("os.system(",),
         "subprocess_shell_true": ("subprocess.", "shell=True"),
-        "naive_sql_concat": ("SELECT", "+"),
     }
+
+    def _build_finding(self, spec: _RuleSpec, match_text: str, line_number: int) -> Finding:
+        category, owasp_category = self._classify(spec.vulnerability_type)
+        return Finding(
+            rule=spec.rule,
+            match=match_text,
+            severity=spec.severity,
+            category=category,
+            owasp_category=owasp_category,
+            description=spec.description,
+            line=line_number,
+            recommendation=spec.recommendation,
+        )
+
+    def _analyze_sql_patterns(self, code: str) -> list[Finding]:
+        code_lower = code.lower()
+        if not any(keyword in code_lower for keyword in ("select", "insert", "update", "delete")):
+            return []
+
+        findings: list[Finding] = []
+        for line_number, line in enumerate(code.splitlines(), start=1):
+            line_lower = line.lower()
+
+            if not any(keyword in line_lower for keyword in ("select", "insert", "update", "delete")):
+                continue
+
+            if self.SQL_WORD_RE.search(line) is None or self.SQL_STRUCTURE_RE.search(line) is None:
+                continue
+
+            select_start = line_lower.find("select")
+            concat_index = line.find("+", max(select_start, 0))
+            has_concat = concat_index != -1
+
+            if has_concat:
+                match_start = select_start if select_start != -1 else 0
+                match_text = line[match_start : concat_index + 1]
+                findings.append(
+                    self._build_finding(self.NAIVE_SQL_CONCAT_SPEC, match_text, line_number)
+                )
+
+            has_fstring = "f\"" in line_lower or "f'" in line_lower
+            if has_fstring and "{" in line and "}" in line:
+                findings.append(
+                    self._build_finding(self.SQL_INJECTION_SPEC, line.strip(), line_number)
+                )
+
+        return findings
 
     def _classify(self, vulnerability_type: str) -> tuple[str, str]:
         return self.VULNERABILITY_CLASSIFICATION.get(
@@ -193,6 +242,8 @@ class SecurityService:
                         recommendation=spec.recommendation,
                     )
                 )
+
+        findings.extend(self._analyze_sql_patterns(code))
 
         return {
             "findings": findings,

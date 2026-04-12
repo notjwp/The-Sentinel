@@ -4,6 +4,7 @@ uvicorn[standard]==0.38.0
 scikit-learn==1.7.2
 openai>=2.6.1
 python-dotenv==1.1.1
+PyJWT[crypto]>=2.10.1
 
 # Testing
 pytest==9.0.2
