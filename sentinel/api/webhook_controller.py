@@ -47,8 +47,9 @@ def get_risk_engine() -> RiskEngine:
 
 def get_llm_service() -> LLMService:
     settings = get_settings()
+    llm_enabled = settings.ENABLE_LLM and bool(settings.NVIDIA_API_KEY)
     return LLMService(
-        enable_llm=settings.ENABLE_LLM,
+        enable_llm=llm_enabled,
         max_calls=settings.LLM_MAX_CALLS,
         timeout=settings.LLM_TIMEOUT,
         api_key=settings.NVIDIA_API_KEY,
@@ -254,6 +255,22 @@ async def webhook(
     translator: Translator = Depends(get_translator),
     github_client: GitHubClient | None = Depends(get_github_client),
 ) -> dict[str, Any]:
+    has_explicit_code = isinstance(payload.code, str) and payload.code.strip() != ""
+    has_simple_queue_fields = (
+        payload.repo is not None
+        or payload.pr_number is not None
+        or payload.author is not None
+        or bool(payload.files)
+    )
+    if has_simple_queue_fields and not has_explicit_code:
+        queued_payload = payload.model_dump(exclude_none=True)
+        try:
+            await orchestrator.enqueue_pull_request(queued_payload)
+        except Exception:
+            logger.exception("Failed to enqueue webhook payload")
+            raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
+        return {"status": "queued"}
+
     try:
         raw_payload = await request.json()
     except Exception:
