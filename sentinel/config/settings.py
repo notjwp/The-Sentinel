@@ -80,10 +80,10 @@ def get_settings() -> Settings:
     return Settings(
         NVIDIA_API_KEY=nvidia_key,
         ENABLE_LLM=_to_bool(os.getenv("ENABLE_LLM"), True),
-        LLM_MAX_CALLS=_to_int(os.getenv("LLM_MAX_CALLS"), 5),
-        LLM_TIMEOUT=_to_float(os.getenv("LLM_TIMEOUT"), 10.0),
+        LLM_MAX_CALLS=_to_int(os.getenv("LLM_MAX_CALLS"), 1),
+        LLM_TIMEOUT=_to_float(os.getenv("LLM_TIMEOUT"), 5.0),
         ENABLE_GITHUB=_to_bool(os.getenv("ENABLE_GITHUB"), True),
-        ENABLE_TRANSLATION=_to_bool(os.getenv("ENABLE_TRANSLATION"), True),
+        ENABLE_TRANSLATION=_to_bool(os.getenv("ENABLE_TRANSLATION"), False),
         ENABLE_DOC_REVIEW=_to_bool(os.getenv("ENABLE_DOC_REVIEW"), True),
         GITHUB_APP_ID=github_app_id,
         GITHUB_INSTALLATION_ID=github_installation_id,

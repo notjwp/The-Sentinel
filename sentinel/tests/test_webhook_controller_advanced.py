@@ -43,14 +43,31 @@ class _DummySecurityService:
 
 
 class _DummyRiskEngine:
-    def __init__(self, severity: SeverityLevel = SeverityLevel.HIGH, should_raise: bool = False) -> None:
+    def __init__(
+        self,
+        severity: SeverityLevel = SeverityLevel.HIGH,
+        should_raise: bool = False,
+        findings: list[Finding] | None = None,
+    ) -> None:
         self.severity = severity
         self.should_raise = should_raise
+        self.findings = findings or []
 
     def assess(self, code: str) -> dict:
         if self.should_raise:
             raise RuntimeError("risk failure")
-        return {"severity": self.severity}
+        return {
+            "severity": self.severity,
+            "complexity": 1,
+            "maintainability": 100.0,
+            "security_findings_count": len(self.findings),
+            "security": {
+                "findings": self.findings,
+                "severity": self.severity,
+            },
+            "semantic_findings_count": 0,
+            "semantic": {"findings": [], "severity": SeverityLevel.LOW},
+        }
 
 
 class _DummyLLMService:
@@ -90,7 +107,7 @@ def test_webhook_synchronous_mode_serializes_findings():
     client = _build_client(
         orchestrator=orchestrator,
         security_service=_DummySecurityService(findings=[finding]),
-        risk_engine=_DummyRiskEngine(severity=SeverityLevel.HIGH),
+        risk_engine=_DummyRiskEngine(severity=SeverityLevel.HIGH, findings=[finding]),
         llm_service=_DummyLLMService(),
     )
 
@@ -152,8 +169,8 @@ def test_webhook_synchronous_processing_exception_returns_error_status():
     orchestrator = _DummyOrchestrator()
     client = _build_client(
         orchestrator=orchestrator,
-        security_service=_DummySecurityService(should_raise=True),
-        risk_engine=_DummyRiskEngine(),
+        security_service=_DummySecurityService(),
+        risk_engine=_DummyRiskEngine(should_raise=True),
         llm_service=_DummyLLMService(),
     )
 
@@ -162,7 +179,7 @@ def test_webhook_synchronous_processing_exception_returns_error_status():
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "error"
-    assert "security failure" in body["message"]
+    assert "risk failure" in body["message"]
 
 
 def test_webhook_queue_exception_returns_500_http_error():

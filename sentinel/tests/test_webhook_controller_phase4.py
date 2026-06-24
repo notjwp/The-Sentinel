@@ -62,8 +62,9 @@ class _SecurityService:
 
 
 class _RiskEngine:
-    def __init__(self, severity: SeverityLevel = SeverityLevel.HIGH) -> None:
+    def __init__(self, severity: SeverityLevel = SeverityLevel.HIGH, findings: list[Finding] | None = None) -> None:
         self.severity = severity
+        self.findings = findings or []
 
     def assess(self, code: str) -> dict:
         _ = code
@@ -71,7 +72,13 @@ class _RiskEngine:
             "severity": self.severity,
             "complexity": 9,
             "maintainability": 91.2,
+            "security_findings_count": len(self.findings),
+            "security": {
+                "findings": list(self.findings),
+                "severity": self.severity,
+            },
             "semantic_findings_count": 0,
+            "semantic": {"findings": [], "severity": SeverityLevel.LOW},
         }
 
 
@@ -94,6 +101,11 @@ class _DocumentService:
             }
         )
         return list(self.findings)
+
+    def analyze_code(self, code, *, source_label="inline"):
+        _ = code
+        _ = source_label
+        return []
 
 
 class _ReportService:
@@ -267,7 +279,7 @@ def test_webhook_async_mode_with_github_payload_populates_queue_fields(monkeypat
     from asyncio import run
 
     result = run(
-        wc.webhook(
+        wc._webhook_impl(
             _DictJsonRequest(
                 {
                     "action": "opened",
@@ -303,7 +315,7 @@ def test_webhook_sync_mode_with_code_and_github_enabled_posts_comment(monkeypatc
     doc = _DocumentService(findings=[_doc_finding()])
     translator = _Translator(value="translated")
     github = _GitHubClient()
-    client = _build_client(orchestrator, security, _RiskEngine(), _LLMService(), doc, translator, github)
+    client = _build_client(orchestrator, security, _RiskEngine(findings=[_security_finding()]), _LLMService(), doc, translator, github)
 
     response = client.post(
         "/webhook",
@@ -408,7 +420,7 @@ def test_webhook_sync_mode_empty_multiple_and_large_findings_payloads(monkeypatc
     client_many = _build_client(
         _DummyOrchestrator(use_full_review=False),
         _SecurityService(findings=many_findings),
-        _RiskEngine(),
+        _RiskEngine(findings=many_findings),
         _LLMService(),
         _DocumentService(),
         _Translator(),
@@ -432,7 +444,7 @@ def test_webhook_direct_call_handles_request_json_failures_and_non_dict(monkeypa
     from asyncio import run
 
     response_from_exception = run(
-        wc.webhook(
+        wc._webhook_impl(
             _RaisingJsonRequest(),
             payload,
             orchestrator,
@@ -449,7 +461,7 @@ def test_webhook_direct_call_handles_request_json_failures_and_non_dict(monkeypa
 
     payload_no_code = wc.WebhookPayload()
     response_from_list = run(
-        wc.webhook(
+        wc._webhook_impl(
             _ListJsonRequest(),
             payload_no_code,
             orchestrator,
@@ -472,7 +484,7 @@ def test_webhook_direct_call_owner_fallback_to_author(monkeypatch):
     from asyncio import run
 
     response = run(
-        wc.webhook(
+        wc._webhook_impl(
             _DictJsonRequest({"code": "x"}),
             wc.WebhookPayload(repo="plain-repo", pr_number=33, author="fallback-owner", code="x"),
             _DummyOrchestrator(use_full_review=True),

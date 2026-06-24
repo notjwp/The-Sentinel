@@ -98,6 +98,21 @@ class OpenAIProvider(LLMProvider):
         )
         return self._run_prompt(system_prompt, user_prompt)
 
+    def review_issue(self, code: str, issue: str) -> str:
+        prompt = (
+            "You are a secure code reviewer.\n\n"
+            "Analyze the code and issue.\n\n"
+            "Code:\n"
+            f"{code}\n\n"
+            "Issue:\n"
+            f"{issue}\n\n"
+            "Respond EXACTLY in this format:\n\n"
+            "Explanation: <short clear explanation>\n\n"
+            "Fix: <only corrected code>\n\n"
+            "Keep it concise."
+        )
+        return self._run_prompt("", prompt)
+
     def explain_issue(self, code: str, issue: str) -> str:
         system_prompt = (
             "You are a concise application security explainer. "

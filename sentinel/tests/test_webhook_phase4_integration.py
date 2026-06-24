@@ -42,7 +42,23 @@ class _DummyRiskEngine:
             "severity": SeverityLevel.HIGH,
             "complexity": 12,
             "maintainability": 71.5,
+            "security_findings_count": 1,
+            "security": {
+                "findings": [
+                    Finding(
+                        rule="sql_injection",
+                        match="SELECT",
+                        severity=SeverityLevel.HIGH,
+                        category="Injection",
+                        owasp_category="A03: Injection",
+                        description="SQL injection detected",
+                        recommendation="Use parameterized queries",
+                    )
+                ],
+                "severity": SeverityLevel.HIGH,
+            },
             "semantic_findings_count": 2,
+            "semantic": {"findings": [], "severity": SeverityLevel.LOW},
         }
 
 
@@ -52,19 +68,12 @@ class _DummyLLMService:
     def reset_budget(self) -> None:
         self.call_count = 0
 
-    def generate_fix_safe(self, code: str, issue: str, *, severity=None) -> str:
+    def analyze_issue_safe(self, code: str, issue: str, *, severity=None) -> tuple[str, str]:
         _ = code
         _ = issue
         _ = severity
         self.call_count += 1
-        return "safe_fix()"
-
-    def explain_issue_safe(self, code: str, issue: str, *, severity=None) -> str:
-        _ = code
-        _ = issue
-        _ = severity
-        self.call_count += 1
-        return "AI explanation"
+        return "AI explanation", "safe_fix()"
 
 
 class _DummyDocumentService:
@@ -87,6 +96,11 @@ class _DummyDocumentService:
                 recommendation="Add usage examples.",
             )
         ]
+
+    def analyze_code(self, code, *, source_label="inline"):
+        _ = code
+        _ = source_label
+        return []
 
 
 class _DummyTranslator:

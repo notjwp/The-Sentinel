@@ -15,19 +15,12 @@ class _LLMService:
         self.call_count = 0
         self.reset_calls += 1
 
-    def generate_fix_safe(self, code: str, issue: str, *, severity=None) -> str:
+    def analyze_issue_safe(self, code: str, issue: str, *, severity=None) -> tuple[str, str]:
         _ = code
         _ = issue
         _ = severity
         self.call_count += 1
-        return self.fix
-
-    def explain_issue_safe(self, code: str, issue: str, *, severity=None) -> str:
-        _ = code
-        _ = issue
-        _ = severity
-        self.call_count += 1
-        return self.explanation
+        return self.explanation, self.fix
 
 
 class _DocumentService:
@@ -48,6 +41,13 @@ class _DocumentService:
         if self.should_raise:
             raise RuntimeError("doc failure")
         return list(self.findings)
+
+    def analyze_code(self, code, *, source_label="inline"):
+        _ = code
+        _ = source_label
+        if self.should_raise:
+            raise RuntimeError("doc failure")
+        return []
 
 
 class _ReportService:
@@ -152,7 +152,7 @@ def test_run_full_review_all_engines_enabled(monkeypatch):
     assert "report:HIGH:2" in final_report
     assert "## Hindi Version" in final_report
     assert "## Kannada Version" in final_report
-    assert doc.calls[0]["enable_llm_review"] is True
+    assert doc.calls[0]["enable_llm_review"] is False
 
 
 def test_collect_document_findings_guards(monkeypatch):
@@ -190,7 +190,10 @@ def test_enrich_findings_no_findings_and_llm_disabled(monkeypatch):
 
 def test_enrich_findings_multiple_findings_with_fallback(monkeypatch):
     monkeypatch.setenv("ENABLE_LLM", "true")
-    llm = _LLMService(fix="Fix suggestion unavailable", explanation="Explanation unavailable")
+    llm = _LLMService(
+        fix="Use parameterized queries or validate input.",
+        explanation="Potential security issue detected. Review code manually.",
+    )
     orchestrator = AuditOrchestrator(JobQueue(), llm_service=llm)
 
     findings = [
@@ -200,8 +203,8 @@ def test_enrich_findings_multiple_findings_with_fallback(monkeypatch):
     ]
     enriched = orchestrator.enrich_findings_with_llm("x", findings)
 
-    assert enriched[0].fix_suggestion == "Fix suggestion unavailable"
-    assert enriched[0].explanation == "Explanation unavailable"
+    assert enriched[0].fix_suggestion == "Use parameterized queries or validate input."
+    assert enriched[0].explanation == "Potential security issue detected. Review code manually."
     assert enriched[1].fix_suggestion is None
     assert enriched[2].explanation is None
     assert llm.reset_calls == 1

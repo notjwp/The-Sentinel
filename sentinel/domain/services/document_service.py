@@ -125,7 +125,11 @@ class DocumentService:
                     "Review this documentation for clarity and completeness. Keep feedback concise.",
                     severity=SeverityLevel.MEDIUM,
                 )
-                if review and review != "Explanation unavailable":
+                fallback_reviews = {
+                    "Explanation unavailable",
+                    "Potential security issue detected. Review code manually.",
+                }
+                if review and review not in fallback_reviews:
                     findings.append(
                         self._doc_finding(
                             rule="doc_clarity_review",
@@ -136,5 +140,94 @@ class DocumentService:
                             explanation=review,
                         )
                     )
+
+        return findings
+
+    CODE_EXTENSIONS = (".py", ".js", ".ts", ".java", ".go", ".rs", ".rb", ".c", ".cpp")
+
+    @staticmethod
+    def _is_code_file(file_name: str) -> bool:
+        normalized = file_name.strip().lower()
+        return normalized.endswith(DocumentService.CODE_EXTENSIONS)
+
+    def analyze_code(self, code: str, *, source_label: str = "inline") -> list[Finding]:
+        """Analyze a raw code string for documentation quality issues."""
+        if not isinstance(code, str) or not code.strip():
+            return []
+
+        findings: list[Finding] = []
+        lines = code.splitlines()
+        non_blank = [line for line in lines if line.strip()]
+
+        # Check for missing module-level docstring
+        stripped_lines = [line.strip() for line in lines if line.strip()]
+        has_module_docstring = False
+        if stripped_lines:
+            first_meaningful = stripped_lines[0]
+            if first_meaningful.startswith(('"""', "'''", '#')):
+                has_module_docstring = True
+            elif len(stripped_lines) > 1 and stripped_lines[1].startswith(('"""', "'''")):
+                has_module_docstring = True
+        if not has_module_docstring and len(non_blank) > 3:
+            findings.append(
+                self._doc_finding(
+                    rule="missing_module_docstring",
+                    severity=SeverityLevel.LOW,
+                    description="Code is missing a module-level docstring or header comment.",
+                    recommendation="Add a module docstring describing the purpose and key components.",
+                    file_name=source_label,
+                )
+            )
+
+        # Check for missing function/class docstrings
+        import re
+        def_pattern = re.compile(r"^\s*(def|class)\s+\w+")
+        def_count = 0
+        documented_def_count = 0
+        for i, line in enumerate(lines):
+            if def_pattern.match(line):
+                def_count += 1
+                # Check next non-blank lines for docstring
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    stripped = lines[j].strip()
+                    if stripped == "":
+                        continue
+                    if stripped.startswith(('"""', "'''", '#')):
+                        documented_def_count += 1
+                    break
+
+        if def_count > 0 and documented_def_count == 0:
+            findings.append(
+                self._doc_finding(
+                    rule="no_function_docstrings",
+                    severity=SeverityLevel.MEDIUM,
+                    description=f"None of the {def_count} function(s)/class(es) have docstrings.",
+                    recommendation="Add docstrings to functions and classes describing their purpose and parameters.",
+                    file_name=source_label,
+                )
+            )
+        elif def_count > 2 and documented_def_count < def_count // 2:
+            findings.append(
+                self._doc_finding(
+                    rule="low_docstring_coverage",
+                    severity=SeverityLevel.LOW,
+                    description=f"Only {documented_def_count}/{def_count} functions/classes have docstrings.",
+                    recommendation="Improve docstring coverage to at least 50% of public functions and classes.",
+                    file_name=source_label,
+                )
+            )
+
+        # Check for very low comment density in non-trivial code
+        comment_lines = sum(1 for line in lines if line.strip().startswith("#"))
+        if len(non_blank) > 10 and comment_lines == 0:
+            findings.append(
+                self._doc_finding(
+                    rule="no_inline_comments",
+                    severity=SeverityLevel.LOW,
+                    description="Code has no inline comments despite being non-trivial.",
+                    recommendation="Add comments explaining complex logic, edge cases, and non-obvious decisions.",
+                    file_name=source_label,
+                )
+            )
 
         return findings

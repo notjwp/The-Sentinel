@@ -14,4 +14,7 @@ def test_base_provider_methods_raise_not_implemented():
         provider.generate_fix("code", "issue")
 
     with pytest.raises(NotImplementedError):
+        provider.review_issue("code", "issue")
+
+    with pytest.raises(NotImplementedError):
         provider.explain_issue("code", "issue")

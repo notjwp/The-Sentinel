@@ -38,10 +38,10 @@ def test_get_settings_defaults_when_env_missing(monkeypatch):
 
     assert settings.NVIDIA_API_KEY is None
     assert settings.ENABLE_LLM is True
-    assert settings.LLM_MAX_CALLS == 5
-    assert settings.LLM_TIMEOUT == 10.0
+    assert settings.LLM_MAX_CALLS == 1
+    assert settings.LLM_TIMEOUT == 5.0
     assert settings.ENABLE_GITHUB is True
-    assert settings.ENABLE_TRANSLATION is True
+    assert settings.ENABLE_TRANSLATION is False
     assert settings.ENABLE_DOC_REVIEW is True
     assert settings.GITHUB_APP_ID is None
     assert settings.GITHUB_INSTALLATION_ID is None
@@ -87,8 +87,8 @@ def test_get_settings_invalid_numeric_env_falls_back_to_defaults(monkeypatch):
 
     settings = settings_module.get_settings()
 
-    assert settings.LLM_MAX_CALLS == 5
-    assert settings.LLM_TIMEOUT == 10.0
+    assert settings.LLM_MAX_CALLS == 1
+    assert settings.LLM_TIMEOUT == 5.0
 
 
 def test_settings_module_import_handles_missing_dotenv(monkeypatch):

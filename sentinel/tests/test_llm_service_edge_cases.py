@@ -6,6 +6,11 @@ class _SuccessProvider:
     def __init__(self) -> None:
         self.fix_calls = 0
         self.explain_calls = 0
+        self.review_calls = 0
+
+    def review_issue(self, code: str, issue: str):
+        self.review_calls += 1
+        return "Explanation: explanation\n\nFix: fixed_code"
 
     def generate_fix(self, code: str, issue: str):
         self.fix_calls += 1
@@ -17,6 +22,8 @@ class _SuccessProvider:
 
 
 class _EmptyProvider:
+    def review_issue(self, code: str, issue: str):
+        return ""
     def generate_fix(self, code: str, issue: str):
         return ""
 
@@ -25,6 +32,8 @@ class _EmptyProvider:
 
 
 class _FailingProvider:
+    def review_issue(self, code: str, issue: str):
+        raise RuntimeError("review failure")
     def generate_fix(self, code: str, issue: str):
         raise RuntimeError("fix failure")
 
@@ -39,8 +48,8 @@ def test_llm_disabled_returns_fallback_and_no_calls():
     fix = service.generate_fix_safe("code", "issue", severity=SeverityLevel.HIGH)
     explanation = service.explain_issue_safe("code", "issue", severity=SeverityLevel.HIGH)
 
-    assert fix == "Fix suggestion unavailable"
-    assert explanation == "Explanation unavailable"
+    assert fix == "Use parameterized queries or validate input."
+    assert explanation == "Potential security issue detected. Review code manually."
     assert service.call_count == 0
     assert provider.fix_calls == 0
     assert provider.explain_calls == 0
@@ -52,7 +61,7 @@ def test_invalid_severity_string_does_not_invoke_provider():
 
     result = service.generate_fix_safe("code", "issue", severity="invalid")
 
-    assert result == "Fix suggestion unavailable"
+    assert result == "Use parameterized queries or validate input."
     assert service.call_count == 0
 
 
@@ -71,12 +80,24 @@ def test_success_results_are_stripped_and_non_empty():
 
 def test_provider_failure_and_empty_results_use_fallbacks():
     failing = LLMService(provider=_FailingProvider(), enable_llm=True, max_calls=5)
-    assert failing.generate_fix_safe("code", "issue", severity=SeverityLevel.HIGH) == "Fix suggestion unavailable"
-    assert failing.explain_issue_safe("code", "issue", severity=SeverityLevel.HIGH) == "Explanation unavailable"
+    assert (
+        failing.generate_fix_safe("code", "issue", severity=SeverityLevel.HIGH)
+        == "Use parameterized queries or validate input."
+    )
+    assert (
+        failing.explain_issue_safe("code", "issue", severity=SeverityLevel.HIGH)
+        == "Potential security issue detected. Review code manually."
+    )
 
     empty = LLMService(provider=_EmptyProvider(), enable_llm=True, max_calls=5)
-    assert empty.generate_fix_safe("code", "issue", severity=SeverityLevel.HIGH) == "Fix suggestion unavailable"
-    assert empty.explain_issue_safe("code", "issue", severity=SeverityLevel.HIGH) == "Explanation unavailable"
+    assert (
+        empty.generate_fix_safe("code", "issue", severity=SeverityLevel.HIGH)
+        == "Use parameterized queries or validate input."
+    )
+    assert (
+        empty.explain_issue_safe("code", "issue", severity=SeverityLevel.HIGH)
+        == "Potential security issue detected. Review code manually."
+    )
 
 
 def test_call_limit_enforced_across_multiple_calls():
@@ -89,7 +110,7 @@ def test_call_limit_enforced_across_multiple_calls():
 
     assert first == "fixed_code"
     assert second == "explanation"
-    assert third == "Fix suggestion unavailable"
+    assert third == "Use parameterized queries or validate input."
     assert service.call_count == 2
     assert service.calls_made == 2
 
@@ -99,9 +120,24 @@ def test_reset_budget_allows_subsequent_calls():
     service = LLMService(provider=provider, enable_llm=True, max_calls=1)
 
     assert service.generate_fix_safe("code", "issue", severity=SeverityLevel.HIGH) == "fixed_code"
-    assert service.generate_fix_safe("code", "issue", severity=SeverityLevel.HIGH) == "Fix suggestion unavailable"
+    assert (
+        service.generate_fix_safe("code", "issue", severity=SeverityLevel.HIGH)
+        == "Use parameterized queries or validate input."
+    )
 
     service.reset_budget()
 
     assert service.call_count == 0
     assert service.generate_fix_safe("code", "issue", severity=SeverityLevel.HIGH) == "fixed_code"
+
+
+def test_analyze_issue_safe_parses_explanation_and_fix():
+    provider = _SuccessProvider()
+    service = LLMService(provider=provider, enable_llm=True, max_calls=5)
+
+    explanation, fix = service.analyze_issue_safe("code", "issue", severity=SeverityLevel.HIGH)
+
+    assert explanation == "explanation"
+    assert fix == "fixed_code"
+    assert service.call_count == 1
+    assert provider.review_calls == 1

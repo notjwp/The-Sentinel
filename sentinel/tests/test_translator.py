@@ -2,7 +2,7 @@ from sentinel.infrastructure.translation.translator import Translator
 
 
 class _FakeLLMService:
-    FALLBACK_EXPLANATION = "Explanation unavailable"
+    FALLBACK_EXPLANATION = "Potential security issue detected. Review code manually."
 
     def __init__(self, response: str) -> None:
         self.response = response
@@ -31,7 +31,9 @@ def test_translator_returns_empty_for_unsupported_language():
 
 
 def test_translator_returns_empty_when_llm_returns_fallback():
-    translator = Translator(llm_service=_FakeLLMService("Explanation unavailable"))
+    translator = Translator(
+        llm_service=_FakeLLMService("Potential security issue detected. Review code manually.")
+    )
 
     translated = translator.translate("Report", "Kannada")
 

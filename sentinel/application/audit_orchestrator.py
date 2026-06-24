@@ -13,6 +13,14 @@ logger = get_logger(__name__)
 class LLMServicePort(Protocol):
     def reset_budget(self) -> None: ...
 
+    def analyze_issue_safe(
+        self,
+        code: str,
+        issue: str,
+        *,
+        severity: SeverityLevel | str | None = None,
+    ) -> tuple[str, str]: ...
+
     def generate_fix_safe(
         self,
         code: str,
@@ -38,6 +46,13 @@ class DocumentServicePort(Protocol):
         *,
         enable_llm_review: bool = False,
         llm_reviewer: object | None = None,
+    ) -> list[Finding]: ...
+
+    def analyze_code(
+        self,
+        code: str,
+        *,
+        source_label: str = "inline",
     ) -> list[Finding]: ...
 
 
@@ -117,12 +132,7 @@ class AuditOrchestrator:
 
             logger.info("Calling LLM for finding severity=%s", severity_name)
             issue_text = finding.description or finding.rule
-            fix = self.llm_service.generate_fix_safe(
-                code,
-                issue_text,
-                severity=severity_name,
-            )
-            explanation = self.llm_service.explain_issue_safe(
+            explanation, fix = self.llm_service.analyze_issue_safe(
                 code,
                 issue_text,
                 severity=severity_name,
@@ -133,7 +143,9 @@ class AuditOrchestrator:
                 finding.rule,
                 severity_name,
             )
-            if fix == "Fix suggestion unavailable" or explanation == "Explanation unavailable":
+            fallback_explanation = getattr(self.llm_service, "FALLBACK_EXPLANATION", None)
+            fallback_fix = getattr(self.llm_service, "FALLBACK_FIX", None)
+            if explanation == fallback_explanation or fix == fallback_fix:
                 logger.warning(
                     "LLM fallback used for finding rule=%s",
                     finding.rule,
@@ -155,25 +167,36 @@ class AuditOrchestrator:
         files: list[str] | None,
         *,
         file_contents: dict[str, str] | None = None,
+        code: str | None = None,
     ) -> list[Finding]:
         settings = get_settings()
         if not settings.ENABLE_DOC_REVIEW:
             return []
         if self.document_service is None:
             return []
-        if not files:
-            return []
 
-        try:
-            findings = self.document_service.analyze(
-                files,
-                file_contents=file_contents,
-                enable_llm_review=settings.ENABLE_LLM,
-                llm_reviewer=self.llm_service,
-            )
-        except Exception:
-            logger.exception("Document review failed; continuing without documentation findings")
-            return []
+        findings: list[Finding] = []
+
+        if files:
+            try:
+                findings.extend(
+                    self.document_service.analyze(
+                        files,
+                        file_contents=file_contents,
+                        enable_llm_review=False,
+                        llm_reviewer=None,
+                    )
+                )
+            except Exception:
+                logger.exception("Document file review failed; continuing")
+
+        if code and isinstance(code, str) and code.strip():
+            try:
+                findings.extend(
+                    self.document_service.analyze_code(code)
+                )
+            except Exception:
+                logger.exception("Document code review failed; continuing")
 
         logger.info("Document review produced %s findings", len(findings))
         return findings
@@ -241,7 +264,7 @@ class AuditOrchestrator:
         semantic_findings_count: int | None = None,
     ) -> tuple[list[Finding], str]:
         security_findings = self.enrich_findings_with_llm(code, findings)
-        document_findings = self.collect_document_findings(files, file_contents=file_contents)
+        document_findings = self.collect_document_findings(files, file_contents=file_contents, code=code)
         all_findings = [*security_findings, *document_findings]
 
         report = self.build_report(

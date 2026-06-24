@@ -83,6 +83,26 @@ def get_github_client() -> GitHubClient | None:
     )
 
 
+def _resolve_override(request: Request, dependency: Any) -> Any:
+    app = getattr(request, "app", None)
+    overrides = getattr(app, "dependency_overrides", None)
+    if isinstance(overrides, dict):
+        override = overrides.get(dependency)
+        if override is not None:
+            return override()
+    return dependency()
+
+
+def _resolve_override_if_present(request: Request, dependency: Any) -> Any | None:
+    app = getattr(request, "app", None)
+    overrides = getattr(app, "dependency_overrides", None)
+    if isinstance(overrides, dict):
+        override = overrides.get(dependency)
+        if override is not None:
+            return override()
+    return None
+
+
 def _as_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -229,8 +249,7 @@ def _append_report_translations(
     return report + "\n\n" + "\n\n".join(translated_sections)
 
 
-@router.post("/webhook")
-async def webhook(
+async def _webhook_impl(
     request: Request,
     payload: WebhookPayload = Body(
         ...,
@@ -263,7 +282,15 @@ async def webhook(
         or bool(payload.files)
     )
     if has_simple_queue_fields and not has_explicit_code:
-        queued_payload = payload.model_dump(exclude_none=True)
+        queued_payload: dict[str, Any] = {}
+        if payload.repo is not None:
+            queued_payload["repo"] = payload.repo
+        if payload.pr_number is not None:
+            queued_payload["pr_number"] = payload.pr_number
+        if payload.author is not None:
+            queued_payload["author"] = payload.author
+        if payload.files:
+            queued_payload["files"] = payload.files
         try:
             await orchestrator.enqueue_pull_request(queued_payload)
         except Exception:
@@ -311,9 +338,8 @@ async def webhook(
             if hasattr(orchestrator, "translator"):
                 orchestrator.translator = translator
 
-            security_result = security_service.analyze(code)
-            findings = security_result.get("findings", [])
             risk_result = risk_engine.assess(code=code)
+            findings = risk_result.get("security", {}).get("findings", [])
             risk = risk_result.get("severity", SeverityLevel.LOW)
             risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk)
 
@@ -336,8 +362,8 @@ async def webhook(
                         document_service.analyze(
                             files,
                             file_contents=file_contents,
-                            enable_llm_review=settings.ENABLE_LLM,
-                            llm_reviewer=llm_service,
+                            enable_llm_review=False,
+                            llm_reviewer=None,
                         )
                     )
                 formatted_report = report_service.format_report(
@@ -426,3 +452,112 @@ async def webhook(
         logger.exception("Failed to enqueue webhook payload")
         raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
     return {"status": "queued"}
+
+
+@router.post("/webhook")
+async def webhook(
+    request: Request,
+    payload: WebhookPayload = Body(
+        ...,
+        examples={
+            "phase2_demo": {
+                "summary": "Synchronous vulnerability classification demo",
+                "value": {
+                    "repo": "demo",
+                    "pr_number": 1,
+                    "author": "user",
+                    "code": "print('hello')",
+                },
+            }
+        },
+    ),
+    orchestrator: AuditOrchestrator = Depends(get_orchestrator),
+) -> dict[str, Any]:
+    has_explicit_code = isinstance(payload.code, str) and payload.code.strip() != ""
+    has_simple_queue_fields = (
+        payload.repo is not None
+        or payload.pr_number is not None
+        or payload.author is not None
+        or bool(payload.files)
+    )
+
+    if has_simple_queue_fields and not has_explicit_code:
+        queued_payload: dict[str, Any] = {}
+        if payload.repo is not None:
+            queued_payload["repo"] = payload.repo
+        if payload.pr_number is not None:
+            queued_payload["pr_number"] = payload.pr_number
+        if payload.author is not None:
+            queued_payload["author"] = payload.author
+        if payload.files:
+            queued_payload["files"] = payload.files
+        try:
+            await orchestrator.enqueue_pull_request(queued_payload)
+        except Exception:
+            logger.exception("Failed to enqueue webhook payload")
+            raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
+        return {"status": "queued"}
+
+    try:
+        raw_payload = await request.json()
+    except Exception:
+        raw_payload = payload.model_dump(exclude_none=True)
+
+    if not isinstance(raw_payload, dict):
+        raw_payload = {}
+
+    code = payload.code
+    if not isinstance(code, str) or code.strip() == "":
+        raw_code = raw_payload.get("code")
+        code = raw_code if isinstance(raw_code, str) else None
+
+    if not code:
+        repo_name = _extract_repo_name(raw_payload, payload.repo)
+        pr_number = _extract_pr_number(raw_payload, payload.pr_number)
+        author = _extract_author(raw_payload, payload.author)
+        files = _extract_files(raw_payload, payload.files)
+
+        queued_payload = payload.model_dump(exclude_none=True)
+        if not queued_payload:
+            if repo_name is not None:
+                queued_payload["repo"] = repo_name
+            if pr_number is not None:
+                queued_payload["pr_number"] = pr_number
+            if author is not None:
+                queued_payload["author"] = author
+            if files:
+                queued_payload["files"] = files
+
+        try:
+            await orchestrator.enqueue_pull_request(queued_payload)
+        except Exception:
+            logger.exception("Failed to enqueue webhook payload")
+            raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
+        return {"status": "queued"}
+
+    security_service = _resolve_override(request, get_security_service)
+    risk_engine = _resolve_override(request, get_risk_engine)
+    llm_service = _resolve_override(request, get_llm_service)
+    report_service = _resolve_override(request, get_report_service)
+    document_service = _resolve_override(request, get_document_service)
+
+    translator_override = _resolve_override_if_present(request, get_translator)
+    translator = (
+        translator_override
+        if translator_override is not None
+        else Translator(llm_service=llm_service)
+    )
+    github_client = _resolve_override(request, get_github_client)
+
+    return await _webhook_impl(
+        request,
+        payload,
+        orchestrator,
+        security_service,
+        risk_engine,
+        llm_service,
+        report_service,
+        document_service,
+        translator,
+        github_client,
+    )

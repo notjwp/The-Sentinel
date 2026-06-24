@@ -107,3 +107,12 @@ def test_chat_returns_none_on_completion_exception_and_invalid_structure():
         client=_Client(_Completions(response=invalid_response)),
     )
     assert provider_invalid.explain_issue("code", "issue") is None
+
+
+def test_review_issue_returns_content_from_chat():
+    response = _ResponseObj(
+        choices=[{"message": {"content": "Explanation: ok\n\nFix: code"}}]
+    )
+    provider = NIMProvider(api_key="key", client=_Client(_Completions(response=response)))
+
+    assert provider.review_issue("code", "issue") == "Explanation: ok\n\nFix: code"

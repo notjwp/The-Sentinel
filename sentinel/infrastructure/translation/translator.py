@@ -40,7 +40,11 @@ class Translator:
         except Exception:
             return ""
 
-        fallback = getattr(self.llm_service, "FALLBACK_EXPLANATION", "Explanation unavailable")
+        fallback = getattr(
+            self.llm_service,
+            "FALLBACK_EXPLANATION",
+            "Potential security issue detected. Review code manually.",
+        )
         if not translated or translated == fallback:
             return ""
 
