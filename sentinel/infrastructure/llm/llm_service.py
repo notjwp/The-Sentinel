@@ -61,101 +61,80 @@ class LLMService:
             return severity.upper()
         return "LOW"
 
-    def _can_invoke(self, severity: SeverityLevel | str | None) -> bool:
+    def _can_invoke(self) -> bool:
         if not self.enable_llm:
             return False
         if self.provider is None:
             return False
         if self.call_count >= self.max_calls:
             return False
-        return self._severity_name(severity) in {"MEDIUM", "HIGH", "CRITICAL"}
+        return True
 
-    @staticmethod
-    def _parse_unified_response(content: str) -> tuple[str, str]:
-        cleaned = content.strip()
-        if "Fix:" in cleaned:
-            explanation_part, fix_part = cleaned.split("Fix:", 1)
-        else:
-            explanation_part = cleaned
-            fix_part = "Fix unavailable"
-        explanation = explanation_part.replace("Explanation:", "").strip()
-        fix = fix_part.strip()
-        return explanation, fix
+    def _parse_pr_audit_response(self, content: str, expected_ids: list[int]) -> dict[int, dict[str, str]]:
+        import re
+        result = {}
+        blocks = re.split(r'(?i)\bIssue:\s*', content)
+        
+        rule_idx = 0
+        for block in blocks:
+            if not block.strip():
+                continue
+                
+            explanation_match = re.search(r'(?i)\bExplanation:\s*(.*?)(?=\bFix:\s*|$)', block, re.DOTALL)
+            fix_match = re.search(r'(?i)\bFix:\s*(.*?)$', block, re.DOTALL)
+            
+            explanation = explanation_match.group(1).strip() if explanation_match else self.FALLBACK_EXPLANATION
+            fix = fix_match.group(1).strip() if fix_match else self.FALLBACK_FIX
+            
+            if rule_idx < len(expected_ids):
+                fid = expected_ids[rule_idx]
+                result[fid] = {"explanation": explanation, "fix": fix}
+                rule_idx += 1
 
-    def analyze_issue_safe(
-        self,
-        code: str,
-        issue: str,
-        *,
-        severity: SeverityLevel | str | None = None,
-    ) -> tuple[str, str]:
-        if not self._can_invoke(severity):
+        for fid in expected_ids:
+            if fid not in result:
+                result[fid] = {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX}
+                
+        return result
+
+    def generate_pr_audit(self, code: str, findings: list) -> dict[int, dict[str, str]]:
+        enrichable = []
+        for finding in findings:
+            severity_name = self._severity_name(finding.severity)
+            is_security = finding.type == "security"
+            is_meaningful_medium = severity_name != "MEDIUM" or bool(finding.recommendation)
+            if is_security and severity_name != "LOW" and is_meaningful_medium:
+                enrichable.append(finding)
+
+        if not enrichable or not self._can_invoke():
             self.logger.info("LLM skipped; using fallback response.")
-            return self.FALLBACK_EXPLANATION, self.FALLBACK_FIX
+            return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
 
-        self.logger.info("LLM request start.")
+        summary_lines = []
+        for i, f in enumerate(enrichable, 1):
+            severity = self._severity_name(f.severity)
+            summary_lines.append(f"{i}. {f.rule}\n   Severity: {severity}")
+            
+        findings_summary = "\n\n".join(summary_lines)
+
+        self.logger.info("LLM PR audit started")
         try:
             self.call_count += 1
-            content = self.provider.review_issue(code, issue)
+            content = self.provider.generate_pr_audit(code, findings_summary)
         except Exception:
             self.logger.exception("LLM request failed; using fallback response.")
-            return self.FALLBACK_EXPLANATION, self.FALLBACK_FIX
+            self.logger.info("Fallback triggered")
+            return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
 
         if not content or not str(content).strip():
             self.logger.warning("LLM returned empty content; using fallback response.")
-            return self.FALLBACK_EXPLANATION, self.FALLBACK_FIX
+            self.logger.info("Fallback triggered")
+            return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
 
-        explanation, fix = self._parse_unified_response(str(content))
-        if not explanation:
-            self.logger.warning("LLM response missing explanation; using fallback explanation.")
-            explanation = self.FALLBACK_EXPLANATION
-        if not fix:
-            self.logger.warning("LLM response missing fix; using fallback fix.")
-            fix = self.FALLBACK_FIX
-
-        self.logger.info("LLM response received.")
-        return explanation, fix
-
-    def generate_fix_safe(
-        self,
-        code: str,
-        issue: str,
-        *,
-        severity: SeverityLevel | str | None = None,
-    ) -> str:
-        if not self._can_invoke(severity):
-            self.logger.info("LLM skipped; using fallback fix.")
-            return self.FALLBACK_FIX
-
-        try:
-            self.call_count += 1
-            result = self.provider.generate_fix(code, issue)
-            if not result:
-                self.logger.warning("LLM returned empty fix; using fallback fix.")
-                return self.FALLBACK_FIX
-            return result.strip()
-        except Exception:
-            self.logger.exception("LLM fix request failed; using fallback fix.")
-            return self.FALLBACK_FIX
-
-    def explain_issue_safe(
-        self,
-        code: str,
-        issue: str,
-        *,
-        severity: SeverityLevel | str | None = None,
-    ) -> str:
-        if not self._can_invoke(severity):
-            self.logger.info("LLM skipped; using fallback explanation.")
-            return self.FALLBACK_EXPLANATION
-
-        try:
-            self.call_count += 1
-            result = self.provider.explain_issue(code, issue)
-            if not result:
-                self.logger.warning("LLM returned empty explanation; using fallback explanation.")
-                return self.FALLBACK_EXPLANATION
-            return result.strip()
-        except Exception:
-            self.logger.exception("LLM explanation request failed; using fallback explanation.")
-            return self.FALLBACK_EXPLANATION
+        self.logger.info("LLM response received")
+        parsed = self._parse_pr_audit_response(str(content), [id(f) for f in enrichable])
+        
+        self.logger.info(f"Parsed {len(parsed)} issue explanations")
+        self.logger.info(f"Total findings enriched: {len(parsed)}")
+        
+        return parsed

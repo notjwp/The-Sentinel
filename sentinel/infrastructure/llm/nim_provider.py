@@ -148,42 +148,22 @@ class NIMProvider(LLMProvider):
 
         return None
 
-    def review_issue(self, code: str, issue: str) -> str | None:
+    def generate_pr_audit(self, code: str, findings_summary: str) -> str | None:
         prompt = (
-            "You are a secure code reviewer.\n\n"
-            "Analyze the code and issue.\n\n"
+            "You are a senior secure code reviewer.\n\n"
+            "Analyze the pull request and detected issues.\n\n"
             "Code:\n"
             f"{code}\n\n"
+            "Detected Issues:\n"
+            f"{findings_summary}\n\n"
+            "For EACH issue provide:\n\n"
             "Issue:\n"
-            f"{issue}\n\n"
-            "Respond EXACTLY in this format:\n\n"
-            "Explanation: <short clear explanation>\n\n"
-            "Fix: <only corrected code>\n\n"
-            "Keep it concise."
+            "Explanation:\n"
+            "Fix:\n\n"
+            "Rules:\n\n"
+            "* Explanation must be concise.\n"
+            "* Fix must contain corrected code.\n"
+            "* Return all issues.\n"
+            "* Do not skip any issue."
         )
         return self._chat("", prompt)
-
-    def generate_fix(self, code: str, issue: str) -> str | None:
-        system_prompt = (
-            "You are a secure coding assistant. Return only corrected code. "
-            "No markdown or explanation."
-        )
-        user_prompt = (
-            "Issue:\n"
-            f"{issue}\n\n"
-            "Code:\n"
-            f"{code}\n\n"
-            "Return only secure corrected code."
-        )
-        return self._chat(system_prompt, user_prompt)
-
-    def explain_issue(self, code: str, issue: str) -> str | None:
-        system_prompt = "You are a concise security explainer."
-        user_prompt = (
-            "Issue:\n"
-            f"{issue}\n\n"
-            "Code:\n"
-            f"{code}\n\n"
-            "Explain briefly: what it is, why dangerous, how to fix."
-        )
-        return self._chat(system_prompt, user_prompt)

@@ -39,27 +39,27 @@ class _Client:
         self.chat = _Chat(completions)
 
 
-def test_generate_fix_returns_clean_text_from_nim_response():
-    completions = _Completions(response=_Response("  safe_code()  "))
+def test_generate_pr_audit_returns_clean_text_from_nim_response():
+    completions = _Completions(response=_Response("  Issue:\nExplanation: e\nFix: f  "))
     provider = NIMProvider(api_key="k", client=_Client(completions), timeout=10.0)
-    assert provider.generate_fix("bad_code", "issue") == "safe_code()"
+    assert provider.generate_pr_audit("code", "summary") == "Issue:\nExplanation: e\nFix: f"
 
     call = completions.calls[0]
     assert call["model"] == "meta/llama-3.3-70b-instruct"
     assert call["stream"] is False
 
 
-def test_explain_issue_returns_none_on_api_error():
+def test_generate_pr_audit_returns_none_on_api_error():
     completions = _Completions(should_raise=True)
     provider = NIMProvider(api_key="k", client=_Client(completions))
-    assert provider.explain_issue("bad_code", "issue") is None
+    assert provider.generate_pr_audit("code", "summary") is None
 
 
 def test_returns_none_when_missing_api_key():
     provider = NIMProvider(api_key="", client=_Client(_Completions()))
-    assert provider.generate_fix("code", "issue") is None
+    assert provider.generate_pr_audit("code", "summary") is None
 
 
 def test_returns_none_on_invalid_payload_shape():
     provider = NIMProvider(api_key="k", client=_Client(_Completions(response=_Response(None))))
-    assert provider.explain_issue("code", "issue") is None
+    assert provider.generate_pr_audit("code", "summary") is None

@@ -11,10 +11,4 @@ def test_base_provider_methods_raise_not_implemented():
     provider = _DummyProvider()
 
     with pytest.raises(NotImplementedError):
-        provider.generate_fix("code", "issue")
-
-    with pytest.raises(NotImplementedError):
-        provider.review_issue("code", "issue")
-
-    with pytest.raises(NotImplementedError):
-        provider.explain_issue("code", "issue")
+        provider.generate_pr_audit("code", "summary")

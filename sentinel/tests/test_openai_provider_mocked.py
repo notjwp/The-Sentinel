@@ -130,7 +130,7 @@ def test_run_prompt_retries_on_exception_and_then_raises():
     assert responses.calls == 2
 
 
-def test_generate_fix_explain_issue_and_review_delegate_to_prompt_runner(monkeypatch):
+def test_generate_pr_audit_delegates_to_prompt_runner(monkeypatch):
     provider = OpenAIProvider(client=_Client(_Responses()), max_retries=0)
 
     calls = []
@@ -141,7 +141,5 @@ def test_generate_fix_explain_issue_and_review_delegate_to_prompt_runner(monkeyp
 
     monkeypatch.setattr(provider, "_run_prompt", _fake_run)
 
-    assert provider.generate_fix("code", "issue") == "ok"
-    assert provider.review_issue("code", "issue") == "ok"
-    assert provider.explain_issue("code", "issue") == "ok"
-    assert len(calls) == 3
+    assert provider.generate_pr_audit("code", "summary") == "ok"
+    assert len(calls) == 1

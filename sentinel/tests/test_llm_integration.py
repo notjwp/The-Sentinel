@@ -8,32 +8,16 @@ from sentinel.workers.job_queue import JobQueue
 
 class FakeLLMProvider(LLMProvider):
     def __init__(self) -> None:
-        self.fix_calls = 0
-        self.explain_calls = 0
-        self.review_calls = 0
+        self.calls = 0
 
-    def review_issue(self, code: str, issue: str) -> str:
-        self.review_calls += 1
-        return "Explanation: explanation\n\nFix: fixed_code"
-
-    def generate_fix(self, code: str, issue: str) -> str:
-        self.fix_calls += 1
-        return "fixed_code"
-
-    def explain_issue(self, code: str, issue: str) -> str:
-        self.explain_calls += 1
-        return "explanation"
+    def generate_pr_audit(self, code: str, findings_summary: str) -> str:
+        self.calls += 1
+        return "Issue:\nExplanation: explanation\nFix: fixed_code"
 
 
 class FailingLLMProvider(LLMProvider):
-    def review_issue(self, code: str, issue: str) -> str:
-        raise RuntimeError("review failed")
-
-    def generate_fix(self, code: str, issue: str) -> str:
-        raise RuntimeError("fix failed")
-
-    def explain_issue(self, code: str, issue: str) -> str:
-        raise RuntimeError("explanation failed")
+    def generate_pr_audit(self, code: str, findings_summary: str) -> str:
+        raise RuntimeError("failed")
 
 
 def test_high_severity_triggers_llm_and_attaches_fields(monkeypatch):
@@ -56,7 +40,7 @@ def test_high_severity_triggers_llm_and_attaches_fields(monkeypatch):
 
     assert enriched[0].explanation == "explanation"
     assert enriched[0].fix_suggestion == "fixed_code"
-    assert provider.review_calls == 1
+    assert provider.calls == 1
 
 
 def test_low_severity_does_not_trigger_llm(monkeypatch):
@@ -79,16 +63,20 @@ def test_low_severity_does_not_trigger_llm(monkeypatch):
 
     assert enriched[0].explanation is None
     assert enriched[0].fix_suggestion is None
-    assert provider.review_calls == 0
+    assert provider.calls == 0
 
 
 def test_fallback_values_are_used_on_provider_failure():
     service = LLMService(provider=FailingLLMProvider(), enable_llm=True, max_calls=5)
-
-    explanation, fix = service.analyze_issue_safe("code", "issue", severity=SeverityLevel.HIGH)
-
-    assert fix == "Use parameterized queries or validate input."
-    assert explanation == "Potential security issue detected. Review code manually."
+    
+    findings = [
+        Finding(rule="r1", match="m", severity=SeverityLevel.HIGH, description="issue")
+    ]
+    
+    result = service.generate_pr_audit("code", findings)
+    
+    assert result[id(findings[0])]["fix"] == "Use parameterized queries or validate input."
+    assert result[id(findings[0])]["explanation"] == "Potential security issue detected. Review code manually."
 
 
 def test_llm_disabled_mode_skips_processing(monkeypatch):
@@ -111,25 +99,7 @@ def test_llm_disabled_mode_skips_processing(monkeypatch):
 
     assert enriched[0].explanation is None
     assert enriched[0].fix_suggestion is None
-    assert provider.review_calls == 0
+    assert provider.calls == 0
 
 
-def test_max_calls_limit_is_enforced_for_multiple_findings(monkeypatch):
-    monkeypatch.setenv("ENABLE_LLM", "true")
 
-    provider = FakeLLMProvider()
-    service = LLMService(provider=provider, enable_llm=True, max_calls=1)
-    orchestrator = AuditOrchestrator(JobQueue(), llm_service=service)
-
-    findings = [
-        Finding(rule="r1", match="m1", severity=SeverityLevel.HIGH, description="issue 1"),
-        Finding(rule="r2", match="m2", severity=SeverityLevel.HIGH, description="issue 2"),
-    ]
-
-    enriched = orchestrator.enrich_findings_with_llm("code", findings)
-
-    assert enriched[0].fix_suggestion == "fixed_code"
-    assert enriched[0].explanation == "explanation"
-    assert enriched[1].fix_suggestion == "Use parameterized queries or validate input."
-    assert enriched[1].explanation == "Potential security issue detected. Review code manually."
-    assert provider.review_calls == 1

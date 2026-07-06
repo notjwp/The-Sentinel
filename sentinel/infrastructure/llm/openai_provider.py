@@ -84,46 +84,22 @@ class OpenAIProvider(LLMProvider):
 
         raise RuntimeError("OpenAI request failed") from last_error
 
-    def generate_fix(self, code: str, issue: str) -> str:
-        system_prompt = (
-            "You are a secure coding assistant. Return only corrected code. "
-            "Do not include explanations, markdown, or comments outside code."
-        )
-        user_prompt = (
-            "Issue description:\n"
-            f"{issue}\n\n"
-            "Original code:\n"
-            f"{code}\n\n"
-            "Produce a secure fix. Return only corrected code."
-        )
-        return self._run_prompt(system_prompt, user_prompt)
-
-    def review_issue(self, code: str, issue: str) -> str:
+    def generate_pr_audit(self, code: str, findings_summary: str) -> str:
         prompt = (
-            "You are a secure code reviewer.\n\n"
-            "Analyze the code and issue.\n\n"
+            "You are a senior secure code reviewer.\n\n"
+            "Analyze the pull request and detected issues.\n\n"
             "Code:\n"
             f"{code}\n\n"
+            "Detected Issues:\n"
+            f"{findings_summary}\n\n"
+            "For EACH issue provide:\n\n"
             "Issue:\n"
-            f"{issue}\n\n"
-            "Respond EXACTLY in this format:\n\n"
-            "Explanation: <short clear explanation>\n\n"
-            "Fix: <only corrected code>\n\n"
-            "Keep it concise."
+            "Explanation:\n"
+            "Fix:\n\n"
+            "Rules:\n\n"
+            "* Explanation must be concise.\n"
+            "* Fix must contain corrected code.\n"
+            "* Return all issues.\n"
+            "* Do not skip any issue."
         )
         return self._run_prompt("", prompt)
-
-    def explain_issue(self, code: str, issue: str) -> str:
-        system_prompt = (
-            "You are a concise application security explainer. "
-            "Keep output brief and practical."
-        )
-        user_prompt = (
-            "Issue description:\n"
-            f"{issue}\n\n"
-            "Code context:\n"
-            f"{code}\n\n"
-            "Explain in three concise parts: "
-            "1) what the issue is, 2) why it is dangerous, 3) how to fix it."
-        )
-        return self._run_prompt(system_prompt, user_prompt)

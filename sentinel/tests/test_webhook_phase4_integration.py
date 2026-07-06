@@ -68,12 +68,10 @@ class _DummyLLMService:
     def reset_budget(self) -> None:
         self.call_count = 0
 
-    def analyze_issue_safe(self, code: str, issue: str, *, severity=None) -> tuple[str, str]:
+    def generate_pr_audit(self, code: str, findings: list) -> dict[int, dict[str, str]]:
         _ = code
-        _ = issue
-        _ = severity
         self.call_count += 1
-        return "AI explanation", "safe_fix()"
+        return {id(f): {"explanation": "AI explanation", "fix": "safe_fix()"} for f in findings}
 
 
 class _DummyDocumentService:

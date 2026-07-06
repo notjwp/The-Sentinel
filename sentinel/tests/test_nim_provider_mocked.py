@@ -87,11 +87,11 @@ def test_extract_content_handles_missing_choices_and_dict_message():
 
 def test_chat_returns_none_for_missing_key_or_client():
     provider_no_key = NIMProvider(api_key="", client=_Client(_Completions()))
-    assert provider_no_key.generate_fix("code", "issue") is None
+    assert provider_no_key.generate_pr_audit("code", "summary") is None
 
     provider_no_client = NIMProvider(api_key="key", client=None)
     provider_no_client._client = None
-    assert provider_no_client.explain_issue("code", "issue") is None
+    assert provider_no_client.generate_pr_audit("code", "summary") is None
 
 
 def test_chat_returns_none_on_completion_exception_and_invalid_structure():
@@ -99,20 +99,20 @@ def test_chat_returns_none_on_completion_exception_and_invalid_structure():
         api_key="key",
         client=_Client(_Completions(response=None, should_raise=True)),
     )
-    assert provider_error.generate_fix("code", "issue") is None
+    assert provider_error.generate_pr_audit("code", "summary") is None
 
     invalid_response = _ResponseObj(choices=[types.SimpleNamespace(message=None)])
     provider_invalid = NIMProvider(
         api_key="key",
         client=_Client(_Completions(response=invalid_response)),
     )
-    assert provider_invalid.explain_issue("code", "issue") is None
+    assert provider_invalid.generate_pr_audit("code", "summary") is None
 
 
-def test_review_issue_returns_content_from_chat():
+def test_generate_pr_audit_returns_content_from_chat():
     response = _ResponseObj(
         choices=[{"message": {"content": "Explanation: ok\n\nFix: code"}}]
     )
     provider = NIMProvider(api_key="key", client=_Client(_Completions(response=response)))
 
-    assert provider.review_issue("code", "issue") == "Explanation: ok\n\nFix: code"
+    assert provider.generate_pr_audit("code", "summary") == "Explanation: ok\n\nFix: code"

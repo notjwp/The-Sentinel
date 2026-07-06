@@ -15,12 +15,17 @@ class _LLMService:
         self.call_count = 0
         self.reset_calls += 1
 
-    def analyze_issue_safe(self, code: str, issue: str, *, severity=None) -> tuple[str, str]:
+    def generate_pr_audit(self, code: str, findings: list) -> dict[int, dict[str, str]]:
         _ = code
-        _ = issue
-        _ = severity
         self.call_count += 1
-        return self.explanation, self.fix
+        result = {}
+        for f in findings:
+            severity_name = f.severity.value if isinstance(f.severity, SeverityLevel) else str(f.severity).upper()
+            is_sec = f.type == "security"
+            is_meaningful = severity_name != "MEDIUM" or bool(f.recommendation)
+            if is_sec and severity_name != "LOW" and is_meaningful:
+                result[id(f)] = {"explanation": self.explanation, "fix": self.fix}
+        return result
 
 
 class _DocumentService:

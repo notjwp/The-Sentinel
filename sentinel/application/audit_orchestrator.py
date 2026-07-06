@@ -13,29 +13,7 @@ logger = get_logger(__name__)
 class LLMServicePort(Protocol):
     def reset_budget(self) -> None: ...
 
-    def analyze_issue_safe(
-        self,
-        code: str,
-        issue: str,
-        *,
-        severity: SeverityLevel | str | None = None,
-    ) -> tuple[str, str]: ...
-
-    def generate_fix_safe(
-        self,
-        code: str,
-        issue: str,
-        *,
-        severity: SeverityLevel | str | None = None,
-    ) -> str: ...
-
-    def explain_issue_safe(
-        self,
-        code: str,
-        issue: str,
-        *,
-        severity: SeverityLevel | str | None = None,
-    ) -> str: ...
+    def generate_pr_audit(self, code: str, findings: list) -> dict[int, dict[str, str]]: ...
 
 
 class DocumentServicePort(Protocol):
@@ -119,45 +97,21 @@ class AuditOrchestrator:
         self.llm_service.reset_budget()
         logger.info("LLM enrichment enabled for %s findings", len(findings))
 
+        audit_response = self.llm_service.generate_pr_audit(code=code, findings=findings)
+
         enriched: list[Finding] = []
         for finding in findings:
-            severity_name = finding.severity.value if isinstance(finding.severity, SeverityLevel) else str(finding.severity).upper()
-            is_security_finding = finding.type == "security"
-            is_meaningful_medium = severity_name != SeverityLevel.MEDIUM.value or bool(finding.recommendation)
-            should_enrich = is_security_finding and severity_name != SeverityLevel.LOW.value and is_meaningful_medium
-
-            if not should_enrich:
+            fid = id(finding)
+            if fid in audit_response:
+                enriched.append(
+                    replace(
+                        finding,
+                        explanation=audit_response[fid]["explanation"],
+                        fix_suggestion=audit_response[fid]["fix"],
+                    )
+                )
+            else:
                 enriched.append(finding)
-                continue
-
-            logger.info("Calling LLM for finding severity=%s", severity_name)
-            issue_text = finding.description or finding.rule
-            explanation, fix = self.llm_service.analyze_issue_safe(
-                code,
-                issue_text,
-                severity=severity_name,
-            )
-
-            logger.info(
-                "LLM invoked for finding rule=%s severity=%s",
-                finding.rule,
-                severity_name,
-            )
-            fallback_explanation = getattr(self.llm_service, "FALLBACK_EXPLANATION", None)
-            fallback_fix = getattr(self.llm_service, "FALLBACK_FIX", None)
-            if explanation == fallback_explanation or fix == fallback_fix:
-                logger.warning(
-                    "LLM fallback used for finding rule=%s",
-                    finding.rule,
-                )
-
-            enriched.append(
-                replace(
-                    finding,
-                    fix_suggestion=fix,
-                    explanation=explanation,
-                )
-            )
 
         logger.info("LLM calls made in request: %s", getattr(self.llm_service, "call_count", "unknown"))
         return enriched
