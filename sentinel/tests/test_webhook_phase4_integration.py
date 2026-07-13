@@ -5,10 +5,8 @@ from sentinel.api.webhook_controller import get_document_service
 from sentinel.api.webhook_controller import get_github_client
 from sentinel.api.webhook_controller import get_llm_service
 from sentinel.api.webhook_controller import get_orchestrator
-from sentinel.api.webhook_controller import get_report_service
 from sentinel.api.webhook_controller import get_risk_engine
 from sentinel.api.webhook_controller import get_security_service
-from sentinel.api.webhook_controller import get_translator
 from sentinel.api.webhook_controller import router as webhook_router
 from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.domain.entities.finding import Finding
@@ -73,6 +71,14 @@ class _DummyLLMService:
         self.call_count += 1
         return {id(f): {"explanation": "AI explanation", "fix": "safe_fix()"} for f in findings}
 
+    def explain_issue_safe(self, code: str, issue: str, *, severity=None) -> str:
+        if "Translate" in issue:
+            if "Hindi" in issue:
+                return "Hindi Version translation"
+            if "Kannada" in issue:
+                return "Kannada Version translation"
+        return "AI explanation"
+
 
 class _DummyDocumentService:
     def analyze(self, files, file_contents=None, *, enable_llm_review=False, llm_reviewer=None):
@@ -101,10 +107,7 @@ class _DummyDocumentService:
         return []
 
 
-class _DummyTranslator:
-    def translate(self, text: str, language: str) -> str:
-        _ = text
-        return f"{language} translation"
+
 
 
 class _DummyGitHubClient:
@@ -122,9 +125,7 @@ def _build_client(github_client: _DummyGitHubClient) -> TestClient:
     app.dependency_overrides[get_security_service] = lambda: _DummySecurityService()
     app.dependency_overrides[get_risk_engine] = lambda: _DummyRiskEngine()
     app.dependency_overrides[get_llm_service] = lambda: _DummyLLMService()
-    app.dependency_overrides[get_report_service] = get_report_service
     app.dependency_overrides[get_document_service] = lambda: _DummyDocumentService()
-    app.dependency_overrides[get_translator] = lambda: _DummyTranslator()
     app.dependency_overrides[get_github_client] = lambda: github_client
     app.include_router(webhook_router)
     return TestClient(app)

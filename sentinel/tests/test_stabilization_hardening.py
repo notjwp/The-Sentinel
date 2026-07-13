@@ -3,10 +3,7 @@ import asyncio
 import pytest
 
 from sentinel.application.audit_orchestrator import AuditOrchestrator
-from sentinel.application.report_service import ReportService
 from sentinel.application.risk_engine import RiskEngine
-from sentinel.application.use_cases import process_pull_request as use_case_module
-from sentinel.application.use_cases.process_pull_request import ProcessPullRequestUseCase
 from sentinel.domain.entities.finding import Finding
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.workers.background_worker import BackgroundWorker
@@ -122,37 +119,31 @@ def test_assess_resilient_sets_high_for_high_semantic_finding():
 
 
 def test_use_case_handles_none_and_non_string_code(monkeypatch):
-    use_case = ProcessPullRequestUseCase(RiskEngine(), ReportService())
-
-    result_none = use_case.execute({"repo": "x", "pr_number": 1, "code": None})
-    result_int = use_case.execute({"repo": "x", "pr_number": 2, "code": 123})
+    result_none = BackgroundWorker.process_job({"repo": "x", "pr_number": 1, "code": None}, RiskEngine())
+    result_int = BackgroundWorker.process_job({"repo": "x", "pr_number": 2, "code": 123}, RiskEngine())
 
     assert result_none == "PR #1 Risk: LOW"
     assert result_int == "PR #2 Risk: LOW"
 
 
 def test_use_case_truncates_large_code_and_still_processes(monkeypatch):
-    monkeypatch.setattr(use_case_module, "MAX_CODE_LENGTH", 5)
-    use_case = ProcessPullRequestUseCase(RiskEngine(), ReportService())
+    monkeypatch.setattr(bw_module, "MAX_CODE_LENGTH", 5)
 
-    result = use_case.execute({"repo": "x", "pr_number": 3, "code": "abcdef"})
+    result = BackgroundWorker.process_job({"repo": "x", "pr_number": 3, "code": "abcdef"}, RiskEngine())
 
     assert result == "PR #3 Risk: LOW"
 
 
 def test_use_case_falls_back_to_low_on_risk_engine_failure():
-    use_case = ProcessPullRequestUseCase(_RaisingRiskEngine(), ReportService())
-
-    result = use_case.execute({"repo": "x", "pr_number": 4, "code": "def a():\n    return 1"})
+    result = BackgroundWorker.process_job({"repo": "x", "pr_number": 4, "code": "def a():\n    return 1"}, _RaisingRiskEngine())
 
     assert result == "PR #4 Risk: LOW"
 
 
 def test_use_case_latency_warning_path_is_safe(monkeypatch):
-    monkeypatch.setattr(use_case_module, "TARGET_LATENCY_SECONDS", -1.0)
-    use_case = ProcessPullRequestUseCase(RiskEngine(), ReportService())
+    monkeypatch.setattr(bw_module, "TARGET_LATENCY_SECONDS", -1.0)
 
-    result = use_case.execute({"repo": "x", "pr_number": 6, "code": ""})
+    result = BackgroundWorker.process_job({"repo": "x", "pr_number": 6, "code": ""}, RiskEngine())
 
     assert result == "PR #6 Risk: LOW"
 

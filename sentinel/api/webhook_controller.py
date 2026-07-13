@@ -7,8 +7,8 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 
+from sentinel.api.webhook_security import verify_webhook_signature
 from sentinel.application.audit_orchestrator import AuditOrchestrator
-from sentinel.application.report_service import ReportService
 from sentinel.application.risk_engine import RiskEngine
 from sentinel.config.settings import get_settings
 from sentinel.domain.services.document_service import DocumentService
@@ -16,7 +16,6 @@ from sentinel.domain.services.security_service import SecurityService
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.infrastructure.github.github_client import GitHubClient
 from sentinel.infrastructure.llm.llm_service import LLMService
-from sentinel.infrastructure.translation.translator import Translator
 from sentinel.monitoring.logger import get_logger
 
 router = APIRouter()
@@ -56,18 +55,8 @@ def get_llm_service() -> LLMService:
     )
 
 
-def get_report_service() -> ReportService:
-    return ReportService()
-
-
 def get_document_service() -> DocumentService:
     return DocumentService()
-
-
-def get_translator(
-    llm_service: LLMService = Depends(get_llm_service),
-) -> Translator:
-    return Translator(llm_service=llm_service)
 
 
 def get_github_client() -> GitHubClient | None:
@@ -224,31 +213,6 @@ def _extract_file_contents(raw_payload: dict[str, Any]) -> dict[str, str]:
     return file_contents
 
 
-def _append_report_translations(
-    report: str,
-    translator: Translator,
-    *,
-    enable_translation: bool,
-) -> str:
-    if not enable_translation:
-        return report
-
-    translated_sections: list[str] = []
-    for language in ("Hindi", "Kannada"):
-        try:
-            translated = translator.translate(report, language)
-        except Exception:
-            continue
-        if translated.strip() == "":
-            continue
-        translated_sections.append(f"## {language} Version\n\n{translated}")
-
-    if not translated_sections:
-        return report
-
-    return report + "\n\n" + "\n\n".join(translated_sections)
-
-
 async def _webhook_impl(
     request: Request,
     payload: WebhookPayload = Body(
@@ -269,9 +233,7 @@ async def _webhook_impl(
     security_service: SecurityService = Depends(get_security_service),
     risk_engine: RiskEngine = Depends(get_risk_engine),
     llm_service: LLMService = Depends(get_llm_service),
-    report_service: ReportService = Depends(get_report_service),
     document_service: DocumentService = Depends(get_document_service),
-    translator: Translator = Depends(get_translator),
     github_client: GitHubClient | None = Depends(get_github_client),
 ) -> dict[str, Any]:
     has_explicit_code = isinstance(payload.code, str) and payload.code.strip() != ""
@@ -331,12 +293,8 @@ async def _webhook_impl(
         try:
             logger.info("Processing webhook synchronously for repo=%s pr_number=%s", repo_name, pr_number)
             orchestrator.llm_service = llm_service
-            if hasattr(orchestrator, "report_service"):
-                orchestrator.report_service = report_service
             if hasattr(orchestrator, "document_service"):
                 orchestrator.document_service = document_service
-            if hasattr(orchestrator, "translator"):
-                orchestrator.translator = translator
 
             risk_result = risk_engine.assess(code=code)
             findings = risk_result.get("security", {}).get("findings", [])
@@ -366,18 +324,15 @@ async def _webhook_impl(
                             llm_reviewer=None,
                         )
                     )
-                formatted_report = report_service.format_report(
+                formatted_report = orchestrator.build_report(
                     findings,
                     risk,
                     complexity=risk_result.get("complexity"),
                     maintainability=risk_result.get("maintainability"),
                     semantic_findings_count=risk_result.get("semantic_findings_count"),
                 )
-                formatted_report = _append_report_translations(
-                    formatted_report,
-                    translator,
-                    enable_translation=settings.ENABLE_TRANSLATION,
-                )
+                if settings.ENABLE_TRANSLATION:
+                    formatted_report = orchestrator.append_translations(formatted_report)
 
             settings = get_settings()
             if (
@@ -454,7 +409,7 @@ async def _webhook_impl(
     return {"status": "queued"}
 
 
-@router.post("/webhook")
+@router.post("/webhook", dependencies=[Depends(verify_webhook_signature)])
 async def webhook(
     request: Request,
     payload: WebhookPayload = Body(
@@ -538,15 +493,7 @@ async def webhook(
     security_service = _resolve_override(request, get_security_service)
     risk_engine = _resolve_override(request, get_risk_engine)
     llm_service = _resolve_override(request, get_llm_service)
-    report_service = _resolve_override(request, get_report_service)
     document_service = _resolve_override(request, get_document_service)
-
-    translator_override = _resolve_override_if_present(request, get_translator)
-    translator = (
-        translator_override
-        if translator_override is not None
-        else Translator(llm_service=llm_service)
-    )
     github_client = _resolve_override(request, get_github_client)
 
     return await _webhook_impl(
@@ -556,8 +503,6 @@ async def webhook(
         security_service,
         risk_engine,
         llm_service,
-        report_service,
         document_service,
-        translator,
         github_client,
     )

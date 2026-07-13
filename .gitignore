@@ -19,6 +19,7 @@ dist/
 .coverage
 .coverage.*
 htmlcov/
+pytest_output.txt
 
 # Type checker/linter caches
 .mypy_cache/
@@ -28,6 +29,9 @@ htmlcov/
 # Mutation testing artifacts
 .mutmut-cache/
 mutants/
+
+# Subagent-driven-development scratch workspace (briefs, reports, review packages, ledger)
+.superpowers/
 
 # Logs
 *.log

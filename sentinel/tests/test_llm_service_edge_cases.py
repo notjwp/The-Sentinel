@@ -14,11 +14,15 @@ class _SuccessProvider:
 
 class _EmptyProvider:
     def generate_pr_audit(self, code: str, summary: str):
+        _ = code
+        _ = summary
         return ""
 
 
 class _FailingProvider:
     def generate_pr_audit(self, code: str, summary: str):
+        _ = code
+        _ = summary
         raise RuntimeError("failure")
 
 

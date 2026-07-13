@@ -34,35 +34,15 @@ class DocumentServicePort(Protocol):
     ) -> list[Finding]: ...
 
 
-class ReportServicePort(Protocol):
-    def format_report(
-        self,
-        findings: list[Finding],
-        risk: SeverityLevel | str,
-        *,
-        complexity: int | None = None,
-        maintainability: float | None = None,
-        semantic_findings_count: int | None = None,
-    ) -> str: ...
-
-
-class TranslatorPort(Protocol):
-    def translate(self, text: str, language: str) -> str: ...
-
-
 class AuditOrchestrator:
     def __init__(
         self,
         queue: JobQueue,
         llm_service: LLMServicePort | None = None,
-        report_service: ReportServicePort | None = None,
-        translator: TranslatorPort | None = None,
         document_service: DocumentServicePort | None = None,
     ) -> None:
         self.queue = queue
         self.llm_service = llm_service
-        self.report_service = report_service
-        self.translator = translator
         self.document_service = document_service
 
     async def enqueue_pull_request(self, payload: dict) -> None:
@@ -164,41 +144,115 @@ class AuditOrchestrator:
         maintainability: float | None = None,
         semantic_findings_count: int | None = None,
     ) -> str:
-        if self.report_service is None:
-            risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk).upper()
-            return f"Sentinel AI Code Review\n\nRisk Score: {risk_value}"
-
+        risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk).upper()
         try:
-            return self.report_service.format_report(
-                findings,
-                risk,
-                complexity=complexity,
-                maintainability=maintainability,
-                semantic_findings_count=semantic_findings_count,
-            )
+            lines: list[str] = [
+                "# Sentinel AI Code Review",
+                "",
+                f"## Risk Score: {risk_value}",
+                "",
+                "## Security Issues",
+            ]
+            security_findings = [finding for finding in findings if finding.type == "security"]
+            if security_findings:
+                for finding in security_findings:
+                    lines.append(
+                        f"- {finding.description or finding.rule} (Severity: {finding.severity.value})"
+                    )
+            else:
+                lines.append("- No security issues detected.")
+
+            lines.extend(["", "## Explanation"])
+            explanations = [finding.explanation for finding in security_findings if finding.explanation]
+            if explanations:
+                for explanation in explanations:
+                    lines.append(f"- {explanation}")
+            else:
+                lines.append("- No AI explanation available.")
+
+            lines.extend(["", "## Fix Suggestion"])
+            fixes = [finding.fix_suggestion for finding in security_findings if finding.fix_suggestion]
+            if fixes:
+                for fix in fixes:
+                    lines.extend(["```python", fix, "```"])
+            else:
+                lines.append("- No fix suggestion available.")
+
+            documentation_findings = [finding for finding in findings if finding.type == "documentation"]
+            if documentation_findings:
+                lines.extend(["", "## Documentation Issues"])
+                for finding in documentation_findings:
+                    lines.append(
+                        f"- {finding.description or finding.rule} (Severity: {finding.severity.value})"
+                    )
+
+            lines.extend(["", "## Technical Debt"])
+            if complexity is None and maintainability is None:
+                lines.append("- Technical debt metrics unavailable.")
+            else:
+                if complexity is not None:
+                    lines.append(f"- Complexity: {complexity}")
+                if maintainability is not None:
+                    lines.append(f"- Maintainability: {maintainability:.2f}")
+
+            lines.extend(["", "## Semantic Similarity"])
+            if semantic_findings_count is None:
+                lines.append("- Semantic similarity metrics unavailable.")
+            else:
+                lines.append(f"- Similar findings detected: {semantic_findings_count}")
+
+            return "\n".join(lines).strip()
         except Exception:
             logger.exception("Report formatting failed; returning safe fallback")
-            risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk).upper()
             return f"Sentinel AI Code Review\n\nRisk Score: {risk_value}"
 
     def append_translations(self, report: str, languages: list[str] | None = None) -> str:
         settings = get_settings()
-        if not settings.ENABLE_TRANSLATION or self.translator is None:
+        if not settings.ENABLE_TRANSLATION or self.llm_service is None:
             return report
+
+        SUPPORTED_LANGUAGES = {
+            "hindi": "Hindi",
+            "kannada": "Kannada",
+            "tamil": "Tamil",
+            "telugu": "Telugu",
+        }
 
         selected_languages = languages or ["Hindi", "Kannada"]
         translated_sections: list[str] = []
 
         for language in selected_languages:
+            normalized_language = language.strip().lower()
+            target_language = SUPPORTED_LANGUAGES.get(normalized_language)
+            if target_language is None:
+                continue
+
             try:
-                translated = self.translator.translate(report, language)
+                instruction = (
+                    "Translate the provided markdown report into "
+                    f"{target_language}. Preserve headings, bullets, and code blocks."
+                )
+                if hasattr(self.llm_service, "explain_issue_safe"):
+                    translated = self.llm_service.explain_issue_safe(
+                        report,
+                        instruction,
+                        severity="HIGH",
+                    )
+                else:
+                    return report
             except Exception:
                 logger.exception("Translation failed for language=%s; skipping", language)
                 continue
 
-            if translated.strip() == "":
+            fallback = getattr(
+                self.llm_service,
+                "FALLBACK_EXPLANATION",
+                "Potential security issue detected. Review code manually.",
+            )
+            if not translated or translated == fallback or translated.strip() == "":
                 continue
-            translated_sections.append(f"## {language} Version\n\n{translated}")
+
+            translated_sections.append(f"## {target_language} Version\n\n{translated.strip()}")
 
         if not translated_sections:
             return report
