@@ -64,3 +64,8 @@ def test_webhook_with_secret_accepts_valid_signature(monkeypatch):
         headers={"Content-Type": "application/json", "X-Hub-Signature-256": sig},
     )
     assert resp.status_code == 200
+
+
+def test_is_valid_signature_non_ascii_header_returns_false():
+    # A non-ASCII signature header must not raise (would 500); it must be rejected.
+    assert is_valid_signature("s3cret", b'{"repo":"r"}', "sha256=\xff") is False

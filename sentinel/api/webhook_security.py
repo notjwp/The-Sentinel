@@ -23,7 +23,7 @@ def is_valid_signature(secret: str, body: bytes, signature_header: str | None) -
     if not signature_header or not signature_header.startswith(_PREFIX):
         return False
     expected = compute_signature(secret, body)
-    return hmac.compare_digest(expected, signature_header)
+    return hmac.compare_digest(expected.encode("utf-8"), signature_header.encode("utf-8"))
 
 
 async def verify_webhook_signature(request: Request) -> None:
