@@ -30,3 +30,12 @@ paths_to_mutate = ["sentinel/domain/", "sentinel/application/", "sentinel/infras
 tests_dir = ["sentinel/tests/"]
 also_copy = ["sentinel/", "main.py"]
 backup = false
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+extend-exclude = [".venv", "mutants", "sentinel/tests/snapshots"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
