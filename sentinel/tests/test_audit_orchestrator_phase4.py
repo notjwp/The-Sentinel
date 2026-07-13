@@ -27,6 +27,14 @@ class _LLMService:
                 result[id(f)] = {"explanation": self.explanation, "fix": self.fix}
         return result
 
+    def explain_issue_safe(self, code: str, issue: str, *, severity=None) -> str:
+        if "Translate" in issue:
+            if "Hindi" in issue:
+                return "Hindi text"
+            if "Kannada" in issue:
+                return "Kannada text"
+        return self.explanation
+
 
 class _DocumentService:
     def __init__(self, findings: list[Finding] | None = None, should_raise: bool = False) -> None:
@@ -55,47 +63,7 @@ class _DocumentService:
         return []
 
 
-class _ReportService:
-    def __init__(self, should_raise: bool = False) -> None:
-        self.should_raise = should_raise
-        self.calls: list[dict] = []
 
-    def format_report(
-        self,
-        findings: list[Finding],
-        risk,
-        *,
-        complexity=None,
-        maintainability=None,
-        semantic_findings_count=None,
-    ) -> str:
-        self.calls.append(
-            {
-                "findings": findings,
-                "risk": risk,
-                "complexity": complexity,
-                "maintainability": maintainability,
-                "semantic_findings_count": semantic_findings_count,
-            }
-        )
-        if self.should_raise:
-            raise RuntimeError("report failed")
-        risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk)
-        return f"report:{risk_value}:{len(findings)}"
-
-
-class _Translator:
-    def __init__(self, responses: dict[str, str] | None = None, raise_languages: set[str] | None = None) -> None:
-        self.responses = responses or {}
-        self.raise_languages = raise_languages or set()
-        self.calls: list[str] = []
-
-    def translate(self, text: str, language: str) -> str:
-        _ = text
-        self.calls.append(language)
-        if language in self.raise_languages:
-            raise RuntimeError("translation failure")
-        return self.responses.get(language, "")
 
 
 def _security_finding(*, severity: SeverityLevel, recommendation: str | None = "do this") -> Finding:
@@ -130,13 +98,9 @@ def test_run_full_review_all_engines_enabled(monkeypatch):
 
     llm = _LLMService()
     doc = _DocumentService(findings=[_doc_finding()])
-    report = _ReportService()
-    translator = _Translator(responses={"Hindi": "Hindi text", "Kannada": "Kannada text"})
     orchestrator = AuditOrchestrator(
         JobQueue(),
         llm_service=llm,
-        report_service=report,
-        translator=translator,
         document_service=doc,
     )
 
@@ -154,7 +118,7 @@ def test_run_full_review_all_engines_enabled(monkeypatch):
     assert len(findings) == 2
     assert findings[0].fix_suggestion == "fixed"
     assert findings[0].explanation == "explained"
-    assert "report:HIGH:2" in final_report
+    assert "Sentinel AI Code Review" in final_report
     assert "## Hindi Version" in final_report
     assert "## Kannada Version" in final_report
     assert doc.calls[0]["enable_llm_review"] is False
@@ -218,38 +182,23 @@ def test_enrich_findings_multiple_findings_with_fallback(monkeypatch):
 def test_build_report_fallback_paths(monkeypatch):
     monkeypatch.setenv("ENABLE_TRANSLATION", "false")
     findings = [_security_finding(severity=SeverityLevel.HIGH)]
-
-    no_report_service = AuditOrchestrator(JobQueue(), report_service=None)
-    rendered = no_report_service.build_report(findings, SeverityLevel.HIGH)
+    orchestrator = AuditOrchestrator(JobQueue())
+    rendered = orchestrator.build_report(findings, SeverityLevel.HIGH)
     assert "Risk Score: HIGH" in rendered
-
-    failing_report = _ReportService(should_raise=True)
-    orchestrator = AuditOrchestrator(JobQueue(), report_service=failing_report)
-    rendered_on_error = orchestrator.build_report(findings, "medium")
-    assert "Risk Score: MEDIUM" in rendered_on_error
 
 
 def test_append_translations_disabled_and_failure_paths(monkeypatch):
     base_report = "# Sentinel AI Code Review"
 
     monkeypatch.setenv("ENABLE_TRANSLATION", "false")
-    orchestrator = AuditOrchestrator(JobQueue(), translator=_Translator())
+    orchestrator = AuditOrchestrator(JobQueue())
     assert orchestrator.append_translations(base_report) == base_report
 
     monkeypatch.setenv("ENABLE_TRANSLATION", "true")
-    no_translator = AuditOrchestrator(JobQueue(), translator=None)
+    no_translator = AuditOrchestrator(JobQueue(), llm_service=None)
     assert no_translator.append_translations(base_report) == base_report
 
-    failing = AuditOrchestrator(
-        JobQueue(),
-        translator=_Translator(raise_languages={"Hindi", "Kannada"}),
-    )
-    assert failing.append_translations(base_report) == base_report
-
-    empty = AuditOrchestrator(JobQueue(), translator=_Translator(responses={"Hindi": "", "Kannada": ""}))
-    assert empty.append_translations(base_report) == base_report
-
-    partial = AuditOrchestrator(JobQueue(), translator=_Translator(responses={"Hindi": "translated"}))
-    rendered = partial.append_translations(base_report)
+    partial = AuditOrchestrator(JobQueue(), llm_service=_LLMService())
+    rendered = partial.append_translations(base_report, ["Hindi"])
     assert "## Hindi Version" in rendered
-    assert "translated" in rendered
+    assert "Hindi text" in rendered

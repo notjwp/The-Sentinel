@@ -1,4 +1,4 @@
-from sentinel.application.report_service import ReportService
+from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.domain.entities.finding import Finding
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 
@@ -33,7 +33,8 @@ def _doc_finding() -> Finding:
 
 
 def test_format_report_handles_no_findings():
-    report = ReportService().format_report([], SeverityLevel.LOW)
+    orchestrator = AuditOrchestrator(queue=None)
+    report = orchestrator.build_report([], SeverityLevel.LOW)
 
     assert "# Sentinel AI Code Review" in report
     assert "## Risk Score: LOW" in report
@@ -45,7 +46,8 @@ def test_format_report_handles_no_findings():
 def test_format_report_handles_multiple_findings_and_formatting():
     findings = [_security_finding(), _security_finding(explanation="another", fix="fix2"), _doc_finding()]
 
-    report = ReportService().format_report(
+    orchestrator = AuditOrchestrator(queue=None)
+    report = orchestrator.build_report(
         findings,
         SeverityLevel.HIGH,
         complexity=10,
@@ -66,7 +68,8 @@ def test_format_report_handles_multiple_findings_and_formatting():
 def test_format_report_handles_missing_explanation_and_fix_branches():
     findings = [_security_finding(explanation=None, fix=None)]
 
-    report = ReportService().format_report(findings, "medium", complexity=5)
+    orchestrator = AuditOrchestrator(queue=None)
+    report = orchestrator.build_report(findings, "medium", complexity=5)
 
     assert "## Risk Score: MEDIUM" in report
     assert "No AI explanation available." in report
@@ -75,7 +78,4 @@ def test_format_report_handles_missing_explanation_and_fix_branches():
     assert "Maintainability" not in report
 
 
-def test_generate_report_kept_compatible():
-    report = ReportService().generate_report(9, SeverityLevel.CRITICAL)
 
-    assert report == "PR #9 Risk: CRITICAL"

@@ -27,6 +27,20 @@ class _DummyOrchestrator:
             raise RuntimeError("enrich failure")
         return findings
 
+    def build_report(
+        self,
+        findings: list[Finding],
+        risk: SeverityLevel | str,
+        *,
+        complexity: int | None = None,
+        maintainability: float | None = None,
+        semantic_findings_count: int | None = None,
+    ) -> str:
+        return "report from dummy orchestrator"
+
+    def append_translations(self, report: str, languages: list[str] | None = None) -> str:
+        return report
+
 
 class _DummySecurityService:
     def __init__(self, findings: list[Finding] | None = None, should_raise: bool = False) -> None:

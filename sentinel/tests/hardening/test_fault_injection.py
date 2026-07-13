@@ -177,21 +177,16 @@ def test_worker_loop_continues_after_use_case_failure(capsys):
         await queue.enqueue({"missing_keys": True})
         await queue.enqueue({"repo": "ok", "pr_number": 7})
 
-        from sentinel.application.report_service import ReportService
         from sentinel.application.risk_engine import RiskEngine
-        from sentinel.application.use_cases.process_pull_request import (
-            ProcessPullRequestUseCase,
-        )
+        from sentinel.workers.background_worker import BackgroundWorker
 
         engine = RiskEngine()
-        report_service = ReportService()
-        use_case = ProcessPullRequestUseCase(engine, report_service)
         processed = 0
 
         while processed < 2:
             job = await queue.dequeue()
             try:
-                report = use_case.execute(job)
+                report = BackgroundWorker.process_job(job, engine)
             except (KeyError, TypeError):
                 report = None
             processed += 1

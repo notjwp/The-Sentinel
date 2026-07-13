@@ -20,6 +20,13 @@ class _DummyOrchestrator:
         _ = code
         return findings
 
+    def build_report(self, findings, risk, *, complexity=None, maintainability=None, semantic_findings_count=None):
+        risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk)
+        return f"report:{risk_value}:{len(findings)}"
+
+    def append_translations(self, report: str, languages: list[str] | None = None) -> str:
+        return report
+
     def _run_full_review(
         self,
         *,
@@ -108,27 +115,7 @@ class _DocumentService:
         return []
 
 
-class _ReportService:
-    def format_report(self, findings, risk, *, complexity=None, maintainability=None, semantic_findings_count=None):
-        _ = complexity
-        _ = maintainability
-        _ = semantic_findings_count
-        risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk)
-        return f"report:{risk_value}:{len(findings)}"
 
-
-class _Translator:
-    def __init__(self, *, should_raise: bool = False, value: str = "translated") -> None:
-        self.should_raise = should_raise
-        self.value = value
-        self.calls: list[str] = []
-
-    def translate(self, text: str, language: str) -> str:
-        _ = text
-        self.calls.append(language)
-        if self.should_raise:
-            raise RuntimeError("translation failure")
-        return self.value
 
 
 class _GitHubClient:
@@ -194,7 +181,6 @@ def _build_client(
     risk_engine: _RiskEngine,
     llm_service: _LLMService,
     document_service: _DocumentService,
-    translator: _Translator,
     github_client,
 ) -> TestClient:
     app = FastAPI(title="Webhook Phase4 Coverage")
@@ -202,9 +188,7 @@ def _build_client(
     app.dependency_overrides[wc.get_security_service] = lambda: security_service
     app.dependency_overrides[wc.get_risk_engine] = lambda: risk_engine
     app.dependency_overrides[wc.get_llm_service] = lambda: llm_service
-    app.dependency_overrides[wc.get_report_service] = lambda: _ReportService()
     app.dependency_overrides[wc.get_document_service] = lambda: document_service
-    app.dependency_overrides[wc.get_translator] = lambda: translator
     app.dependency_overrides[wc.get_github_client] = lambda: github_client
     app.include_router(wc.router)
     return TestClient(app)
@@ -244,17 +228,7 @@ def test_helper_extractors_cover_branch_variants():
     assert contents["docs.txt"] == "+x"
 
 
-def test_append_report_translations_paths():
-    translator = _Translator()
-    assert wc._append_report_translations("report", translator, enable_translation=False) == "report"
 
-    failing = _Translator(should_raise=True)
-    assert wc._append_report_translations("report", failing, enable_translation=True) == "report"
-
-    success = _Translator(value="ok")
-    translated = wc._append_report_translations("report", success, enable_translation=True)
-    assert "## Hindi Version" in translated
-    assert "## Kannada Version" in translated
 
 
 def test_get_github_client_disabled_returns_none(monkeypatch):
@@ -293,9 +267,7 @@ def test_webhook_async_mode_with_github_payload_populates_queue_fields(monkeypat
             _SecurityService(),
             _RiskEngine(),
             _LLMService(),
-            _ReportService(),
             _DocumentService(),
-            _Translator(),
             None,
         )
     )
@@ -313,9 +285,8 @@ def test_webhook_sync_mode_with_code_and_github_enabled_posts_comment(monkeypatc
     orchestrator = _DummyOrchestrator(use_full_review=True)
     security = _SecurityService(findings=[_security_finding()])
     doc = _DocumentService(findings=[_doc_finding()])
-    translator = _Translator(value="translated")
     github = _GitHubClient()
-    client = _build_client(orchestrator, security, _RiskEngine(findings=[_security_finding()]), _LLMService(), doc, translator, github)
+    client = _build_client(orchestrator, security, _RiskEngine(findings=[_security_finding()]), _LLMService(), doc, github)
 
     response = client.post(
         "/webhook",
@@ -345,8 +316,7 @@ def test_webhook_sync_mode_fallback_path_toggles_doc_and_translation(monkeypatch
     orchestrator = _DummyOrchestrator(use_full_review=False)
     security = _SecurityService(findings=[_security_finding()])
     doc = _DocumentService(findings=[_doc_finding()])
-    translator = _Translator(value="translated")
-    client = _build_client(orchestrator, security, _RiskEngine(), _LLMService(), doc, translator, None)
+    client = _build_client(orchestrator, security, _RiskEngine(), _LLMService(), doc, None)
 
     response = client.post("/webhook", json={"repo": "demo", "pr_number": 7, "code": "x = 1"})
 
@@ -354,7 +324,6 @@ def test_webhook_sync_mode_fallback_path_toggles_doc_and_translation(monkeypatch
     body = response.json()
     assert body["status"] == "processed"
     assert "report" in body
-    assert translator.calls == []
     assert doc.calls == []
 
 
@@ -371,7 +340,6 @@ def test_webhook_sync_mode_handles_orchestrator_and_github_exceptions(monkeypatc
         _RiskEngine(),
         _LLMService(),
         _DocumentService(),
-        _Translator(),
         _GitHubClient(),
     )
     error_response = client_error.post("/webhook", json={"repo": "demo", "pr_number": 8, "code": "x"})
@@ -386,7 +354,6 @@ def test_webhook_sync_mode_handles_orchestrator_and_github_exceptions(monkeypatc
         _RiskEngine(),
         _LLMService(),
         _DocumentService(),
-        _Translator(),
         _GitHubClient(should_raise=True),
     )
     github_error_response = client_github_error.post(
@@ -409,7 +376,6 @@ def test_webhook_sync_mode_empty_multiple_and_large_findings_payloads(monkeypatc
         _RiskEngine(severity=SeverityLevel.LOW),
         _LLMService(),
         _DocumentService(),
-        _Translator(),
         None,
     )
     empty_response = client_empty.post("/webhook", json={"repo": "demo", "pr_number": 5, "code": "x"})
@@ -423,7 +389,6 @@ def test_webhook_sync_mode_empty_multiple_and_large_findings_payloads(monkeypatc
         _RiskEngine(findings=many_findings),
         _LLMService(),
         _DocumentService(),
-        _Translator(),
         None,
     )
     many_response = client_many.post("/webhook", json={"repo": "demo", "pr_number": 6, "code": "x"})
@@ -451,9 +416,7 @@ def test_webhook_direct_call_handles_request_json_failures_and_non_dict(monkeypa
             _SecurityService(findings=[_security_finding()]),
             _RiskEngine(),
             _LLMService(),
-            _ReportService(),
             _DocumentService(),
-            _Translator(),
             None,
         )
     )
@@ -468,9 +431,7 @@ def test_webhook_direct_call_handles_request_json_failures_and_non_dict(monkeypa
             _SecurityService(),
             _RiskEngine(),
             _LLMService(),
-            _ReportService(),
             _DocumentService(),
-            _Translator(),
             None,
         )
     )
@@ -491,9 +452,7 @@ def test_webhook_direct_call_owner_fallback_to_author(monkeypatch):
             _SecurityService(findings=[_security_finding()]),
             _RiskEngine(),
             _LLMService(),
-            _ReportService(),
             _DocumentService(),
-            _Translator(),
             github,
         )
     )
