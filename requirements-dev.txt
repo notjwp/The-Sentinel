@@ -1,0 +1,15 @@
+# Development tooling: tests, linting, and mutation testing.
+# Pulls in the runtime deps too, so this is the only file needed for local dev:
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Testing
+pytest==9.0.2
+pytest-cov==7.0.0
+httpx==0.28.1
+
+# Linting
+ruff==0.15.21
+
+# Mutation testing
+mutmut==3.5.0

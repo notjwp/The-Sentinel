@@ -13,9 +13,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python deps first (layer cache)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python deps first (layer cache). Mutation testing needs the dev
+# tooling (pytest, mutmut), so install requirements-dev.txt, not the runtime set.
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements-dev.txt
 
 # Copy source and config
 COPY pyproject.toml .
