@@ -18,6 +18,7 @@ dist/
 .pytest_cache/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 pytest_output.txt
 
@@ -43,7 +44,14 @@ mutants/
 # IDE/editor settings
 .vscode/
 .idea/
+*.code-workspace
+*.swp
+*.swo
+*~
 
 # OS artifacts
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
