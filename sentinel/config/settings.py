@@ -49,6 +49,7 @@ class Settings:
     GITHUB_INSTALLATION_ID: str | None
     GITHUB_PRIVATE_KEY: str | None
     GITHUB_API_BASE_URL: str
+    GITHUB_WEBHOOK_SECRET: str | None
 
 
 def get_settings() -> Settings:
@@ -77,6 +78,11 @@ def get_settings() -> Settings:
         github_api_base_url = "https://api.github.com"
     github_api_base_url = github_api_base_url.strip() or "https://api.github.com"
 
+    raw_webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET")
+    github_webhook_secret = raw_webhook_secret.strip() if raw_webhook_secret is not None else None
+    if github_webhook_secret == "":
+        github_webhook_secret = None
+
     return Settings(
         NVIDIA_API_KEY=nvidia_key,
         ENABLE_LLM=_to_bool(os.getenv("ENABLE_LLM"), True),
@@ -89,4 +95,5 @@ def get_settings() -> Settings:
         GITHUB_INSTALLATION_ID=github_installation_id,
         GITHUB_PRIVATE_KEY=github_private_key,
         GITHUB_API_BASE_URL=github_api_base_url,
+        GITHUB_WEBHOOK_SECRET=github_webhook_secret,
     )

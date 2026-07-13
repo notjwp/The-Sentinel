@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 
+from sentinel.api.webhook_security import verify_webhook_signature
 from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
 from sentinel.config.settings import get_settings
@@ -408,7 +409,7 @@ async def _webhook_impl(
     return {"status": "queued"}
 
 
-@router.post("/webhook")
+@router.post("/webhook", dependencies=[Depends(verify_webhook_signature)])
 async def webhook(
     request: Request,
     payload: WebhookPayload = Body(
