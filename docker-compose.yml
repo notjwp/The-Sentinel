@@ -1,0 +1,10 @@
+services:
+  sentinel:
+    build: .
+    image: sentinel:dev
+    ports:
+      - "8000:8000"
+    # Requires a local .env (git-ignored). Remove this block to run with defaults.
+    env_file:
+      - .env
+    restart: unless-stopped
