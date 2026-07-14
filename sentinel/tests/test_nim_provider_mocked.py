@@ -76,6 +76,7 @@ def test_build_client_success_passes_base_url_and_timeout(monkeypatch):
     assert captured["api_key"] == "key"
     assert captured["base_url"] == "https://integrate.api.nvidia.com/v1"
     assert captured["timeout"] == 7.0
+    assert captured["max_retries"] == 0  # SDK retries disabled; provider retries itself
 
 
 def test_extract_content_handles_missing_choices_and_dict_message():

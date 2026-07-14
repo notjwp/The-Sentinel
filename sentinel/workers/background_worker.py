@@ -244,7 +244,9 @@ class BackgroundWorker:
                 sys.stdout.write(f"{report_line}\n")
                 sys.stdout.flush()
 
-                self._post_review(job, assessment, orchestrator, github_client)
+                await asyncio.to_thread(
+                    self._post_review, job, assessment, orchestrator, github_client
+                )
 
                 elapsed = time.monotonic() - start_time
                 logger.info("Processed job in %.4fs", elapsed)
