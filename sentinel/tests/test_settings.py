@@ -26,6 +26,9 @@ def test_get_settings_defaults_when_env_missing(monkeypatch):
     monkeypatch.delenv("ENABLE_LLM", raising=False)
     monkeypatch.delenv("LLM_MAX_CALLS", raising=False)
     monkeypatch.delenv("LLM_TIMEOUT", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("ENABLE_GITHUB", raising=False)
     monkeypatch.delenv("ENABLE_TRANSLATION", raising=False)
     monkeypatch.delenv("ENABLE_DOC_REVIEW", raising=False)
@@ -40,6 +43,9 @@ def test_get_settings_defaults_when_env_missing(monkeypatch):
     assert settings.ENABLE_LLM is True
     assert settings.LLM_MAX_CALLS == 1
     assert settings.LLM_TIMEOUT == 5.0
+    assert settings.LLM_BASE_URL == "https://integrate.api.nvidia.com/v1"
+    assert settings.LLM_MODEL == "deepseek-ai/deepseek-v4-flash"
+    assert settings.LLM_API_KEY is None
     assert settings.ENABLE_GITHUB is True
     assert settings.ENABLE_TRANSLATION is False
     assert settings.ENABLE_DOC_REVIEW is True
@@ -54,6 +60,9 @@ def test_get_settings_reads_env_values_and_empty_key_handling(monkeypatch):
     monkeypatch.setenv("ENABLE_LLM", "false")
     monkeypatch.setenv("LLM_MAX_CALLS", "12")
     monkeypatch.setenv("LLM_TIMEOUT", "4.5")
+    monkeypatch.setenv("LLM_BASE_URL", " https://api.groq.com/openai/v1 ")
+    monkeypatch.setenv("LLM_MODEL", " llama-3.3-70b-versatile ")
+    monkeypatch.setenv("LLM_API_KEY", " gsk-key ")
     monkeypatch.setenv("ENABLE_GITHUB", "false")
     monkeypatch.setenv("ENABLE_TRANSLATION", "false")
     monkeypatch.setenv("ENABLE_DOC_REVIEW", "false")
@@ -68,6 +77,9 @@ def test_get_settings_reads_env_values_and_empty_key_handling(monkeypatch):
     assert settings.ENABLE_LLM is False
     assert settings.LLM_MAX_CALLS == 12
     assert settings.LLM_TIMEOUT == 4.5
+    assert settings.LLM_BASE_URL == "https://api.groq.com/openai/v1"
+    assert settings.LLM_MODEL == "llama-3.3-70b-versatile"
+    assert settings.LLM_API_KEY == "gsk-key"  # explicit LLM_API_KEY wins over NVIDIA_API_KEY
     assert settings.ENABLE_GITHUB is False
     assert settings.ENABLE_TRANSLATION is False
     assert settings.ENABLE_DOC_REVIEW is False
@@ -79,6 +91,19 @@ def test_get_settings_reads_env_values_and_empty_key_handling(monkeypatch):
     monkeypatch.setenv("NVIDIA_API_KEY", "   ")
     settings_empty = settings_module.get_settings()
     assert settings_empty.NVIDIA_API_KEY is None
+
+
+def test_llm_api_key_falls_back_to_nvidia_key(monkeypatch):
+    # Back-compat: existing setups only set NVIDIA_API_KEY.
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-fallback")
+    settings = settings_module.get_settings()
+    assert settings.LLM_API_KEY == "nv-fallback"
+
+    # An empty LLM_API_KEY also falls back, not the empty string.
+    monkeypatch.setenv("LLM_API_KEY", "   ")
+    settings_empty = settings_module.get_settings()
+    assert settings_empty.LLM_API_KEY == "nv-fallback"
 
 
 def test_get_settings_invalid_numeric_env_falls_back_to_defaults(monkeypatch):

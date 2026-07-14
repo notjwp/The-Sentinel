@@ -342,3 +342,149 @@ def test_get_pull_request_code_empty_when_no_files(monkeypatch):
     client = GitHubClient(app_id="123", installation_id="999", private_key="private")
     monkeypatch.setattr(client, "get_pull_request_files", lambda *a, **k: [])
     assert client.get_pull_request_code("octo", "repo", 7) == ""
+
+
+def test_list_issue_comments_success_and_failures(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    def fake_list(method, url, headers, data=None):
+        assert method == "GET"
+        assert url.endswith("/repos/octo/repo/issues/7/comments?per_page=100")
+        assert headers["Authorization"] == "token installation-token"
+        return [{"id": 1, "body": "hi"}, "junk", {"id": 2, "body": "yo"}]
+
+    monkeypatch.setattr(client, "_http_json_list", fake_list)
+    assert client.list_issue_comments("octo", "repo", 7) == [
+        {"id": 1, "body": "hi"},
+        {"id": 2, "body": "yo"},
+    ]
+
+    # None (error) response -> []
+    monkeypatch.setattr(client, "_http_json_list", lambda *a, **k: None)
+    assert client.list_issue_comments("octo", "repo", 7) == []
+
+
+def test_list_issue_comments_empty_without_owner_or_token(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+    assert client.list_issue_comments("", "repo", 7) == []
+    assert client.list_issue_comments("octo", "", 7) == []
+
+    monkeypatch.setattr(client, "_get_installation_token", lambda: None)
+    assert client.list_issue_comments("octo", "repo", 7) == []
+
+
+def test_update_comment_success_and_failures(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    def fake_patch(method, url, headers, data=None):
+        assert method == "PATCH"
+        assert url.endswith("/repos/octo/repo/issues/comments/55")
+        assert data == {"body": "updated"}
+        return {"id": 55}
+
+    monkeypatch.setattr(client, "_http_json", fake_patch)
+    assert client.update_comment("octo", "repo", 55, "updated") is True
+
+    monkeypatch.setattr(client, "_http_json", lambda *a, **k: None)
+    assert client.update_comment("octo", "repo", 55, "updated") is False
+
+    monkeypatch.setattr(client, "_get_installation_token", lambda: None)
+    assert client.update_comment("octo", "repo", 55, "updated") is False
+
+
+def test_update_comment_rejects_empty_inputs():
+    client = GitHubClient(app_id=None, installation_id=None, private_key=None)
+    assert client.update_comment("", "repo", 1, "body") is False
+    assert client.update_comment("octo", "", 1, "body") is False
+    assert client.update_comment("octo", "repo", 1, "") is False
+
+
+def test_upsert_comment_updates_existing_marked_comment(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    marker = GitHubClient.SENTINEL_COMMENT_MARKER
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        client,
+        "list_issue_comments",
+        lambda *a, **k: [
+            {"id": 10, "body": "unrelated human comment"},
+            {"id": 11, "body": f"{marker}\n# old Sentinel review"},
+        ],
+    )
+
+    def fake_update(owner, repo, comment_id, body):
+        calls["update"] = (owner, repo, comment_id, body)
+        return True
+
+    def fake_post(*a, **k):
+        calls["post"] = True
+        return True
+
+    monkeypatch.setattr(client, "update_comment", fake_update)
+    monkeypatch.setattr(client, "post_comment", fake_post)
+
+    assert client.upsert_comment("octo", "repo", 7, "# fresh review") is True
+    # PATCHed the marked comment (id 11); never created a new one.
+    assert calls["update"][:3] == ("octo", "repo", 11)
+    assert calls["update"][3] == f"{marker}\n# fresh review"  # marker prepended once
+    assert "post" not in calls
+
+
+def test_upsert_comment_creates_when_no_marked_comment(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    marker = GitHubClient.SENTINEL_COMMENT_MARKER
+    posted: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        client, "list_issue_comments", lambda *a, **k: [{"id": 10, "body": "just a human"}]
+    )
+    monkeypatch.setattr(client, "update_comment", lambda *a, **k: pytest.fail("should not update"))
+
+    def fake_post(owner, repo, pr_number, body):
+        posted["args"] = (owner, repo, pr_number, body)
+        return True
+
+    monkeypatch.setattr(client, "post_comment", fake_post)
+
+    assert client.upsert_comment("octo", "repo", 7, "# review") is True
+    assert posted["args"] == ("octo", "repo", 7, f"{marker}\n# review")
+
+
+def test_upsert_comment_falls_back_to_post_when_list_fails(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+
+    def boom(*a, **k):
+        raise RuntimeError("list blew up")
+
+    monkeypatch.setattr(client, "list_issue_comments", boom)
+    monkeypatch.setattr(client, "post_comment", lambda *a, **k: True)
+
+    assert client.upsert_comment("octo", "repo", 7, "# review") is True
+
+
+def test_upsert_comment_does_not_double_prepend_marker(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    marker = GitHubClient.SENTINEL_COMMENT_MARKER
+    seen: dict[str, str] = {}
+
+    def fake_post(owner, repo, pr, body):
+        seen["body"] = body
+        return True
+
+    monkeypatch.setattr(client, "list_issue_comments", lambda *a, **k: [])
+    monkeypatch.setattr(client, "post_comment", fake_post)
+
+    already_marked = f"{marker}\n# review"
+    assert client.upsert_comment("octo", "repo", 7, already_marked) is True
+    assert seen["body"] == already_marked  # unchanged; marker not duplicated
+
+
+def test_upsert_comment_rejects_empty_inputs():
+    client = GitHubClient(app_id=None, installation_id=None, private_key=None)
+    assert client.upsert_comment("", "repo", 1, "body") is False
+    assert client.upsert_comment("octo", "", 1, "body") is False
+    assert client.upsert_comment("octo", "repo", 1, "") is False

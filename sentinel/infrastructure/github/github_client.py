@@ -10,6 +10,11 @@ class GitHubClient:
     private_key: str | None
     api_base_url: str = "https://api.github.com"
 
+    # Hidden marker embedded in Sentinel's own PR comments so re-runs can find and
+    # update the existing review in place instead of stacking duplicates. Bare (no
+    # annotation) so @dataclass treats it as a class attribute, not a field.
+    SENTINEL_COMMENT_MARKER = "<!-- sentinel-review -->"
+
     def __post_init__(self) -> None:
         self._installation_token: str | None = None
         self._installation_token_expiry: float = 0.0
@@ -200,6 +205,91 @@ class GitHubClient:
         )
 
         return isinstance(response, dict) and isinstance(response.get("id"), int)
+
+    def list_issue_comments(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+        """GET the issue comments on a PR (first page). Returns [] on any failure."""
+        if not owner or not repo:
+            return []
+
+        token = self._get_installation_token()
+        if not token:
+            return []
+
+        endpoint = (
+            f"{self.api_base_url.rstrip('/')}/repos/{owner}/{repo}"
+            f"/issues/{pr_number}/comments?per_page=100"
+        )
+        response = self._http_json_list(
+            "GET",
+            endpoint,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"token {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            data=None,
+        )
+
+        if not isinstance(response, list):
+            return []
+        return [item for item in response if isinstance(item, dict)]
+
+    def update_comment(self, owner: str, repo: str, comment_id: int, body: str) -> bool:
+        """PATCH an existing issue comment in place. Returns False on any failure."""
+        if not owner or not repo or not body:
+            return False
+
+        token = self._get_installation_token()
+        if not token:
+            return False
+
+        endpoint = (
+            f"{self.api_base_url.rstrip('/')}/repos/{owner}/{repo}"
+            f"/issues/comments/{comment_id}"
+        )
+        response = self._http_json(
+            "PATCH",
+            endpoint,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"token {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "Content-Type": "application/json",
+            },
+            data={"body": body},
+        )
+
+        return isinstance(response, dict) and isinstance(response.get("id"), int)
+
+    def upsert_comment(self, owner: str, repo: str, pr_number: int, body: str) -> bool:
+        """Post Sentinel's review, or update its existing comment in place.
+
+        Idempotent: the body carries a hidden ``SENTINEL_COMMENT_MARKER`` so later
+        runs locate the prior review and PATCH it instead of stacking new comments.
+        Falls back to creating a comment when none is found or the lookup fails.
+        """
+        if not owner or not repo or not body:
+            return False
+
+        if self.SENTINEL_COMMENT_MARKER in body:
+            marked_body = body
+        else:
+            marked_body = f"{self.SENTINEL_COMMENT_MARKER}\n{body}"
+
+        try:
+            for comment in self.list_issue_comments(owner, repo, pr_number):
+                existing_body = comment.get("body")
+                comment_id = comment.get("id")
+                if (
+                    isinstance(existing_body, str)
+                    and self.SENTINEL_COMMENT_MARKER in existing_body
+                    and isinstance(comment_id, int)
+                ):
+                    return self.update_comment(owner, repo, comment_id, marked_body)
+        except Exception:
+            pass
+
+        return self.post_comment(owner, repo, pr_number, marked_body)
 
     @staticmethod
     def _added_lines_from_patch(patch: str | None) -> str:

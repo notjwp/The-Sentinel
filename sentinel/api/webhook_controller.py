@@ -46,12 +46,14 @@ def get_risk_engine() -> RiskEngine:
 
 def get_llm_service() -> LLMService:
     settings = get_settings()
-    llm_enabled = settings.ENABLE_LLM and bool(settings.NVIDIA_API_KEY)
+    llm_enabled = settings.ENABLE_LLM and bool(settings.LLM_API_KEY)
     return LLMService(
         enable_llm=llm_enabled,
         max_calls=settings.LLM_MAX_CALLS,
         timeout=settings.LLM_TIMEOUT,
-        api_key=settings.NVIDIA_API_KEY,
+        api_key=settings.LLM_API_KEY,
+        base_url=settings.LLM_BASE_URL,
+        model=settings.LLM_MODEL,
     )
 
 
@@ -345,7 +347,7 @@ async def _webhook_impl(
                 and pr_number is not None
             ):
                 try:
-                    posted = github_client.post_comment(owner, repo_name, pr_number, formatted_report)
+                    posted = github_client.upsert_comment(owner, repo_name, pr_number, formatted_report)
                     logger.info(
                         "GitHub comment posted=%s owner=%s repo=%s pr=%s",
                         posted,

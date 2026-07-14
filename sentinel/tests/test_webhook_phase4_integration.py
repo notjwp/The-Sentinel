@@ -118,6 +118,10 @@ class _DummyGitHubClient:
         self.calls.append((owner, repo, pr_number, body))
         return True
 
+    def upsert_comment(self, owner: str, repo: str, pr_number: int, body: str) -> bool:
+        # The sync path posts via the idempotent upsert; delegate to record identically.
+        return self.post_comment(owner, repo, pr_number, body)
+
 
 def _build_client(github_client: _DummyGitHubClient) -> TestClient:
     app = FastAPI(title="Phase4 Integration Test")

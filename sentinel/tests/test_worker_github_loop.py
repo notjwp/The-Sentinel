@@ -26,6 +26,30 @@ class _FakeGitHub:
         self.posted.append((owner, repo, pr_number, body))
         return True
 
+    def upsert_comment(self, owner: str, repo: str, pr_number, body: str) -> bool:
+        # The worker posts via the idempotent upsert; record identically to post.
+        self.posted.append((owner, repo, pr_number, body))
+        return True
+
+
+class _FakeLLM:
+    """A stand-in LLM service that tags every finding with a distinctive explanation.
+
+    Proves the worker actually routes findings through enrich_findings_with_llm before
+    building the report (the enrichment matches by id(finding)).
+    """
+
+    ENRICHED_MARK = "SENTINEL_ENRICHED_EXPLANATION"
+
+    def reset_budget(self) -> None:
+        pass
+
+    def generate_pr_audit(self, code, findings):
+        return {
+            id(finding): {"explanation": self.ENRICHED_MARK, "fix": "apply the fix"}
+            for finding in findings
+        }
+
 
 def _drive_one_job(worker: BackgroundWorker, queue: JobQueue, fake: _FakeGitHub) -> None:
     real_sleep = asyncio.sleep
@@ -57,6 +81,7 @@ def test_worker_fetches_pr_code_and_posts_structured_review(monkeypatch, capsys)
     # Vulnerable code the worker will only ever see by fetching it from GitHub.
     fake = _FakeGitHub('password = "hunter2"\napi_key = "sk-abcdefghijklmnopqrst"')
     monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
 
     async def _seed(queue: JobQueue) -> None:
         await queue.enqueue({"owner": "octo", "repo": "hello", "pr_number": 7})
@@ -77,6 +102,9 @@ def test_worker_fetches_pr_code_and_posts_structured_review(monkeypatch, capsys)
     assert "# Sentinel AI Code Review" in body
     assert "## Risk Score: HIGH" in body  # hardcoded secrets are HIGH severity
     assert "## Security Issues" in body
+    # Proof the fetched findings were routed through LLM enrichment before the report
+    # was built (the '## Explanation' section now carries the enriched text).
+    assert _FakeLLM.ENRICHED_MARK in body
 
     # The one-liner still prints, now reflecting the fetched code (not empty -> LOW).
     assert "PR #7 Risk: HIGH" in capsys.readouterr().out

@@ -129,6 +129,11 @@ class _GitHubClient:
         self.calls.append((owner, repo, pr_number, body))
         return True
 
+    def upsert_comment(self, owner: str, repo: str, pr_number: int, body: str) -> bool:
+        # The sync path posts via the idempotent upsert; delegate so should_raise
+        # and the recorded `calls` assertions keep exercising the same behavior.
+        return self.post_comment(owner, repo, pr_number, body)
+
 
 class _RaisingJsonRequest:
     async def json(self):

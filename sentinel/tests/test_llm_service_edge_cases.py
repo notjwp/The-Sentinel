@@ -123,3 +123,83 @@ def test_analyze_issue_safe_parses_explanation_and_fix():
     assert result[id(f)]["fix"] == "fixed_code"
     assert service.call_count == 1
     assert provider.calls == 1
+
+
+def test_llm_service_threads_base_url_and_model_to_provider():
+    # When no explicit provider is given, base_url/model flow through to NIMProvider,
+    # so switching providers is a config change (client construction makes no network call).
+    service = LLMService(enable_llm=True, api_key="k", base_url="http://x/v1", model="custom-model")
+    assert service.provider is not None
+    assert service.provider.base_url == "http://x/v1"
+    assert service.provider.model == "custom-model"
+
+
+def test_llm_service_uses_provider_defaults_when_base_url_model_omitted():
+    # Omitting them preserves NIMProvider's NVIDIA class defaults (back-compat).
+    service = LLMService(enable_llm=True, api_key="k")
+    assert service.provider.base_url == "https://integrate.api.nvidia.com/v1"
+    assert service.provider.model == "deepseek-ai/deepseek-v4-flash"
+
+
+class _MarkdownProvider:
+    """A model that wraps labels in markdown bold, adds a numbered header, and fences code."""
+
+    def generate_pr_audit(self, code: str, summary: str):
+        _ = code
+        _ = summary
+        return (
+            "**Issue 1: hardcoded_secret**\n\n"
+            "**Issue:** Hardcoded secret password\n"
+            "**Explanation:** The password is hardcoded, which is a real security risk.\n"
+            "**Fix:**\n```python\npassword = os.environ['PW']\n```\n"
+        )
+
+
+def test_parser_handles_markdown_preamble_and_code_fences():
+    # Real-world failure mode: model answers correctly but with markdown + a numbered
+    # header before the first label — the old index-based parser dropped it to fallback.
+    service = LLMService(provider=_MarkdownProvider(), enable_llm=True, max_calls=5)
+    f = _finding()
+    result = service.generate_pr_audit("code", [f])[id(f)]
+
+    assert result["explanation"] != LLMService.FALLBACK_EXPLANATION
+    assert "hardcoded" in result["explanation"].lower()
+    assert result["fix"] != LLMService.FALLBACK_FIX
+    assert "os.environ" in result["fix"]
+    assert "```" not in result["fix"]  # wrapping code fence stripped
+    assert "**" not in result["explanation"]  # markdown emphasis stripped
+
+
+class _MultiIssueProvider:
+    def generate_pr_audit(self, code: str, summary: str):
+        _ = code
+        _ = summary
+        return (
+            "Issue: one\nExplanation: first explanation\nFix: fix_one\n"
+            "Issue: two\nExplanation: second explanation\nFix: fix_two\n"
+        )
+
+
+def test_parser_maps_multiple_issues_in_order():
+    service = LLMService(provider=_MultiIssueProvider(), enable_llm=True, max_calls=5)
+    f1 = _finding(rule="r1")
+    f2 = _finding(rule="r2")
+    out = service.generate_pr_audit("code", [f1, f2])
+
+    assert out[id(f1)] == {"explanation": "first explanation", "fix": "fix_one"}
+    assert out[id(f2)] == {"explanation": "second explanation", "fix": "fix_two"}
+
+
+def test_parser_falls_back_per_field_when_labels_missing():
+    # No parseable labels at all -> both fields fall back, no crash.
+    class _GarbleProvider:
+        def generate_pr_audit(self, code: str, summary: str):
+            _ = code
+            _ = summary
+            return "here is some prose with no structured labels whatsoever"
+
+    service = LLMService(provider=_GarbleProvider(), enable_llm=True, max_calls=5)
+    f = _finding()
+    result = service.generate_pr_audit("code", [f])[id(f)]
+    assert result["explanation"] == LLMService.FALLBACK_EXPLANATION
+    assert result["fix"] == LLMService.FALLBACK_FIX

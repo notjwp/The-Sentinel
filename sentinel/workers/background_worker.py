@@ -9,6 +9,7 @@ from sentinel.domain.entities.pull_request import PullRequest
 from sentinel.domain.services.semantic_service import SemanticService
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.infrastructure.github.github_client import GitHubClient
+from sentinel.infrastructure.llm.llm_service import LLMService
 from sentinel.infrastructure.semantic.embedding_engine import EmbeddingEngine
 from sentinel.monitoring.logger import get_logger
 from sentinel.workers.job_queue import JobQueue
@@ -38,6 +39,26 @@ def _build_github_client(settings: Settings) -> GitHubClient | None:
         installation_id=settings.GITHUB_INSTALLATION_ID,
         private_key=settings.GITHUB_PRIVATE_KEY,
         api_base_url=settings.GITHUB_API_BASE_URL,
+    )
+
+
+def _build_llm_service(settings: Settings) -> LLMService:
+    """Build the LLM service for the worker (mirrors webhook_controller.get_llm_service).
+
+    Kept at module scope so tests can monkeypatch ``bw_module._build_llm_service``.
+    With no LLM_API_KEY, ``enable_llm`` is False and the service returns fallback
+    strings without any network call — so wiring it in is safe with creds absent.
+    Base URL / model / key come from env (LLM_BASE_URL / LLM_MODEL / LLM_API_KEY),
+    so the provider is swappable without a code change.
+    """
+    llm_enabled = settings.ENABLE_LLM and bool(settings.LLM_API_KEY)
+    return LLMService(
+        enable_llm=llm_enabled,
+        max_calls=settings.LLM_MAX_CALLS,
+        timeout=settings.LLM_TIMEOUT,
+        api_key=settings.LLM_API_KEY,
+        base_url=settings.LLM_BASE_URL,
+        model=settings.LLM_MODEL,
     )
 
 
@@ -182,14 +203,15 @@ class BackgroundWorker:
         try:
             security = assessment.get("security", {})
             findings = security.get("findings", []) if isinstance(security, dict) else []
+            enriched = orchestrator.enrich_findings_with_llm(job.get("code", ""), findings)
             report = orchestrator.build_report(
-                findings,
+                enriched,
                 assessment["severity"],
                 complexity=assessment.get("complexity"),
                 maintainability=assessment.get("maintainability"),
                 semantic_findings_count=assessment.get("semantic_findings_count"),
             )
-            posted = github_client.post_comment(owner, repo_name, pr_number, report)
+            posted = github_client.upsert_comment(owner, repo_name, pr_number, report)
             logger.info(
                 "Worker posted review comment=%s repo=%s pr=%s", posted, repo_name, pr_number
             )
@@ -203,7 +225,8 @@ class BackgroundWorker:
 
         settings = get_settings()
         github_client = _build_github_client(settings)
-        orchestrator = AuditOrchestrator(self.queue)
+        llm_service = _build_llm_service(settings)
+        orchestrator = AuditOrchestrator(self.queue, llm_service=llm_service)
 
         while True:
             try:

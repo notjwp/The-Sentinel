@@ -42,6 +42,9 @@ class Settings:
     ENABLE_LLM: bool
     LLM_MAX_CALLS: int
     LLM_TIMEOUT: float
+    LLM_BASE_URL: str
+    LLM_MODEL: str
+    LLM_API_KEY: str | None
     ENABLE_GITHUB: bool
     ENABLE_TRANSLATION: bool
     ENABLE_DOC_REVIEW: bool
@@ -57,6 +60,23 @@ def get_settings() -> Settings:
     nvidia_key = raw_key.strip() if raw_key is not None else None
     if nvidia_key == "":
         nvidia_key = None
+
+    # Provider-agnostic LLM config (OpenAI-compatible). Defaults reproduce today's
+    # NVIDIA behavior; LLM_API_KEY falls back to NVIDIA_API_KEY for back-compat.
+    raw_llm_base = os.getenv("LLM_BASE_URL")
+    llm_base_url = raw_llm_base.strip() if raw_llm_base is not None else ""
+    if llm_base_url == "":
+        llm_base_url = "https://integrate.api.nvidia.com/v1"
+
+    raw_llm_model = os.getenv("LLM_MODEL")
+    llm_model = raw_llm_model.strip() if raw_llm_model is not None else ""
+    if llm_model == "":
+        llm_model = "deepseek-ai/deepseek-v4-flash"
+
+    raw_llm_key = os.getenv("LLM_API_KEY")
+    llm_api_key = raw_llm_key.strip() if raw_llm_key is not None else None
+    if not llm_api_key:
+        llm_api_key = nvidia_key
 
     raw_private_key = os.getenv("GITHUB_PRIVATE_KEY")
     github_private_key = raw_private_key.strip() if raw_private_key is not None else None
@@ -88,6 +108,9 @@ def get_settings() -> Settings:
         ENABLE_LLM=_to_bool(os.getenv("ENABLE_LLM"), True),
         LLM_MAX_CALLS=_to_int(os.getenv("LLM_MAX_CALLS"), 1),
         LLM_TIMEOUT=_to_float(os.getenv("LLM_TIMEOUT"), 5.0),
+        LLM_BASE_URL=llm_base_url,
+        LLM_MODEL=llm_model,
+        LLM_API_KEY=llm_api_key,
         ENABLE_GITHUB=_to_bool(os.getenv("ENABLE_GITHUB"), True),
         ENABLE_TRANSLATION=_to_bool(os.getenv("ENABLE_TRANSLATION"), False),
         ENABLE_DOC_REVIEW=_to_bool(os.getenv("ENABLE_DOC_REVIEW"), True),

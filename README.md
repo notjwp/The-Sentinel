@@ -37,11 +37,15 @@ enrichment, documentation findings, markdown report building, and optional trans
 1. **Queued (async) mode** — payload has repo/pr_number/author/files but **no `code`**.
    Enqueues a job; `BackgroundWorker` later fetches the PR's diff from GitHub
    (`GitHubClient.get_pull_request_code`, added `+` lines only), runs
-   `RiskEngine.assess_resilient`, and posts a structured `build_report` back as a PR comment.
-   This is the only path where the **semantic engine is wired in**.
+   `RiskEngine.assess_resilient`, LLM-enriches the security findings, and posts a structured
+   `build_report` back as a PR comment. This is the only path where the **semantic engine is
+   wired in**.
 2. **Synchronous mode** — payload has `code`. Runs `RiskEngine.assess` +
    `AuditOrchestrator.run_full_review` inline and returns findings plus a markdown report in
    the HTTP response. If GitHub is configured, the report is also posted as a PR comment.
+
+Both paths post via `GitHubClient.upsert_comment`, which tags the comment with a hidden marker
+and **updates Sentinel's existing review in place** on re-runs instead of stacking duplicates.
 
 `assess` raises on engine failure; `assess_resilient` swallows failures and returns safe
 defaults. All LLM/GitHub calls are failure-safe — on any error they fall back to static
@@ -97,18 +101,23 @@ credentials even when the flag is on.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ENABLE_LLM` | `true` | Enable LLM enrichment (requires `NVIDIA_API_KEY`) |
+| `ENABLE_LLM` | `true` | Enable LLM enrichment (requires a resolved `LLM_API_KEY`) |
 | `ENABLE_GITHUB` | `true` | Enable PR comment posting (requires GitHub App vars) |
 | `ENABLE_DOC_REVIEW` | `true` | Enable documentation findings |
 | `ENABLE_TRANSLATION` | `false` | Append translated report sections (requires LLM) |
 | `LLM_MAX_CALLS` | `1` | Per-request LLM call budget |
 | `LLM_TIMEOUT` | `5.0` | LLM request timeout (seconds) |
-| `NVIDIA_API_KEY` | — | Credential for the NVIDIA NIM provider |
+| `LLM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | LLM endpoint (any OpenAI-compatible provider) |
+| `LLM_MODEL` | `deepseek-ai/deepseek-v4-flash` | Model id at that endpoint |
+| `LLM_API_KEY` | — | LLM credential; **falls back to `NVIDIA_API_KEY`** when unset |
+| `NVIDIA_API_KEY` | — | Back-compat credential / fallback for `LLM_API_KEY` |
 | `GITHUB_APP_ID` / `GITHUB_INSTALLATION_ID` / `GITHUB_PRIVATE_KEY` | — | GitHub App auth (RS256) |
 | `GITHUB_API_BASE_URL` | `https://api.github.com` | GitHub API base URL |
 
-The LLM provider is **NVIDIA NIM**: the `openai` SDK pointed at
-`https://integrate.api.nvidia.com/v1` running `meta/llama-3.3-70b-instruct`.
+The LLM provider is **any OpenAI-compatible endpoint** (the `openai` SDK pointed at
+`LLM_BASE_URL`). Defaults target NVIDIA NIM; switch to a working NVIDIA model, Groq, Gemini,
+or a local Ollama by editing `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` — no code change.
+See [`.env.example`](.env.example) for ready-to-paste provider presets.
 
 ## Run
 

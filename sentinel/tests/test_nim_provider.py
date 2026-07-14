@@ -45,7 +45,7 @@ def test_generate_pr_audit_returns_clean_text_from_nim_response():
     assert provider.generate_pr_audit("code", "summary") == "Issue:\nExplanation: e\nFix: f"
 
     call = completions.calls[0]
-    assert call["model"] == "meta/llama-3.3-70b-instruct"
+    assert call["model"] == "deepseek-ai/deepseek-v4-flash"
     assert call["stream"] is False
 
 

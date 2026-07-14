@@ -43,6 +43,8 @@ ARCHITECTURE.md
 # Environment and secrets
 .env
 .env.*
+# ...but keep the placeholder-only example (documents provider presets)
+!.env.example
 
 # IDE/editor settings
 .vscode/

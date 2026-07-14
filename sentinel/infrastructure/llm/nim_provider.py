@@ -28,7 +28,7 @@ def _get_logger(name: str):
 
 class NIMProvider(LLMProvider):
     BASE_URL = "https://integrate.api.nvidia.com/v1"
-    MODEL = "meta/llama-3.3-70b-instruct"
+    MODEL = "deepseek-ai/deepseek-v4-flash"
     RETRY_DELAYS = (0.3, 0.8)
 
     def __init__(
@@ -150,20 +150,21 @@ class NIMProvider(LLMProvider):
 
     def generate_pr_audit(self, code: str, findings_summary: str) -> str | None:
         prompt = (
-            "You are a senior secure code reviewer.\n\n"
-            "Analyze the pull request and detected issues.\n\n"
-            "Code:\n"
-            f"{code}\n\n"
-            "Detected Issues:\n"
-            f"{findings_summary}\n\n"
-            "For EACH issue provide:\n\n"
-            "Issue:\n"
-            "Explanation:\n"
-            "Fix:\n\n"
-            "Rules:\n\n"
-            "* Explanation must be concise.\n"
-            "* Fix must contain corrected code.\n"
-            "* Return all issues.\n"
-            "* Do not skip any issue."
+            "You are a senior secure code reviewer. Review the pull request and the "
+            "detected issues below.\n\n"
+            f"Code:\n{code}\n\n"
+            f"Detected Issues:\n{findings_summary}\n\n"
+            "For EACH detected issue, output one block in EXACTLY this format:\n\n"
+            "Issue: <short title>\n"
+            "Explanation: <one or two concise sentences>\n"
+            "Fix: <corrected code only>\n\n"
+            "Formatting rules — follow them exactly:\n"
+            "- Use the labels 'Issue:', 'Explanation:', and 'Fix:' verbatim, each at the "
+            "start of its own line.\n"
+            "- Do NOT use markdown: no **bold**, no headings (#), no bullet points, no "
+            "numbering before the labels.\n"
+            "- Put the fix code on the line(s) after 'Fix:' with no code fences (no ```).\n"
+            "- Emit one block per issue, in the same order as listed above, and output "
+            "nothing else."
         )
         return self._chat("", prompt)
