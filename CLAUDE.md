@@ -55,7 +55,9 @@ FastAPI/sklearn/infrastructure) is **enforced by tests** in `sentinel/tests/hard
 
 `POST /webhook` branches on payload contents (`sentinel/api/webhook_controller.py`):
 
-1. **Queued (async) mode** — payload has repo/pr_number/author/files but **no `code`**. Enqueues a job; `BackgroundWorker` later runs `RiskEngine.assess_resilient`. This is the only path where the **semantic engine is wired in** (the worker constructs `RiskEngine(semantic_service=...)`).
+1. **Queued (async) mode** — payload has repo/pr_number/author/files but **no `code`**. Enqueues a job; `BackgroundWorker` later fetches the PR's real diff from GitHub, runs `RiskEngine.assess_resilient`, and posts a structured `AuditOrchestrator.build_report` back via `GitHubClient.post_comment`. This is the only path where the **semantic engine is wired in** (the worker constructs `RiskEngine(semantic_service=...)`).
+   - **Code fetch (M1):** when the job carries `owner`/`repo`/`pr_number` and GitHub is enabled, `BackgroundWorker._fetch_pr_code` calls `GitHubClient.get_pull_request_code` → `GET /pulls/{n}/files`, keeping each patch's **added (`+`) lines** as the code to analyze (no LLM in the background loop). The queued payload now threads an **`owner`** key (derived via `_extract_owner`, or split from an `owner/name` repo); without an owner the fetch/post are skipped and the worker analyzes whatever `code` the job holds (usually empty). `GitHubClient._http_json` discards JSON arrays, so PR-file listing uses a separate `_http_json_list` primitive.
+   - `BackgroundWorker.process_job` still returns the pinned one-liner `PR #<n> Risk: <SEV>`; it and `start()` share `_assess` (single assessment) + `_format_risk_line`.
 2. **Synchronous mode** — payload has `code`. Runs `RiskEngine.assess` + `AuditOrchestrator.run_full_review` inline and returns findings + a markdown report in the HTTP response. Semantic analysis is **not** wired here.
 
 `RiskEngine.assess` raises on engine failure; `assess_resilient` swallows failures and returns safe defaults. Use the resilient variant for anything running in the background.

@@ -35,8 +35,10 @@ enrichment, documentation findings, markdown report building, and optional trans
 `POST /webhook` branches on payload contents:
 
 1. **Queued (async) mode** — payload has repo/pr_number/author/files but **no `code`**.
-   Enqueues a job; `BackgroundWorker` later runs `RiskEngine.assess_resilient`. This is the
-   only path where the **semantic engine is wired in**.
+   Enqueues a job; `BackgroundWorker` later fetches the PR's diff from GitHub
+   (`GitHubClient.get_pull_request_code`, added `+` lines only), runs
+   `RiskEngine.assess_resilient`, and posts a structured `build_report` back as a PR comment.
+   This is the only path where the **semantic engine is wired in**.
 2. **Synchronous mode** — payload has `code`. Runs `RiskEngine.assess` +
    `AuditOrchestrator.run_full_review` inline and returns findings plus a markdown report in
    the HTTP response. If GitHub is configured, the report is also posted as a PR comment.

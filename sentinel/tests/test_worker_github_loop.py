@@ -1,0 +1,142 @@
+"""M1: the async worker fetches real PR code from GitHub and posts a review.
+
+Drives a real ``BackgroundWorker.start()`` iteration with a fake GitHub client
+injected via ``bw_module._build_github_client`` (the module-level seam), proving
+the full loop: fetch diff -> assess -> build_report -> post_comment.
+"""
+
+import asyncio
+
+import sentinel.workers.background_worker as bw_module
+from sentinel.workers.background_worker import BackgroundWorker
+from sentinel.workers.job_queue import JobQueue
+
+
+class _FakeGitHub:
+    def __init__(self, code: str) -> None:
+        self._code = code
+        self.fetched_with: tuple | None = None
+        self.posted: list[tuple] = []
+
+    def get_pull_request_code(self, owner: str, repo: str, pr_number) -> str:
+        self.fetched_with = (owner, repo, pr_number)
+        return self._code
+
+    def post_comment(self, owner: str, repo: str, pr_number, body: str) -> bool:
+        self.posted.append((owner, repo, pr_number, body))
+        return True
+
+
+def _drive_one_job(worker: BackgroundWorker, queue: JobQueue, fake: _FakeGitHub) -> None:
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_: float) -> None:
+        await real_sleep(0)
+
+    async def _run() -> None:
+        original_sleep = bw_module.asyncio.sleep
+        bw_module.asyncio.sleep = fast_sleep
+
+        task = asyncio.create_task(worker.start())
+        for _ in range(500):
+            if fake.posted:
+                break
+            await real_sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        bw_module.asyncio.sleep = original_sleep
+
+    asyncio.run(_run())
+
+
+def test_worker_fetches_pr_code_and_posts_structured_review(monkeypatch, capsys):
+    # Vulnerable code the worker will only ever see by fetching it from GitHub.
+    fake = _FakeGitHub('password = "hunter2"\napi_key = "sk-abcdefghijklmnopqrst"')
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+
+    async def _seed(queue: JobQueue) -> None:
+        await queue.enqueue({"owner": "octo", "repo": "hello", "pr_number": 7})
+
+    queue = JobQueue()
+    asyncio.run(_seed(queue))
+    worker = BackgroundWorker(queue)
+
+    _drive_one_job(worker, queue, fake)
+
+    # Fetched using the job's identity (bare repo name).
+    assert fake.fetched_with == ("octo", "hello", 7)
+
+    # Posted exactly one structured review to the right PR.
+    assert len(fake.posted) == 1
+    owner, repo, pr_number, body = fake.posted[0]
+    assert (owner, repo, pr_number) == ("octo", "hello", 7)
+    assert "# Sentinel AI Code Review" in body
+    assert "## Risk Score: HIGH" in body  # hardcoded secrets are HIGH severity
+    assert "## Security Issues" in body
+
+    # The one-liner still prints, now reflecting the fetched code (not empty -> LOW).
+    assert "PR #7 Risk: HIGH" in capsys.readouterr().out
+
+
+def test_worker_splits_owner_repo_from_full_name(monkeypatch, capsys):
+    """When repo arrives as 'owner/name', the worker calls GitHub with the bare name."""
+    fake = _FakeGitHub("x = 1")
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+
+    async def _seed(queue: JobQueue) -> None:
+        # owner separate, repo carries the full "owner/name" form.
+        await queue.enqueue({"owner": "octo", "repo": "octo/hello", "pr_number": 3})
+
+    queue = JobQueue()
+    asyncio.run(_seed(queue))
+    worker = BackgroundWorker(queue)
+
+    _drive_one_job(worker, queue, fake)
+
+    assert fake.fetched_with == ("octo", "hello", 3)
+    assert fake.posted and fake.posted[0][:3] == ("octo", "hello", 3)
+    assert "PR #3 Risk:" in capsys.readouterr().out
+
+
+def test_worker_skips_github_when_no_owner(monkeypatch, capsys):
+    """Owner-less (flat/manual) jobs neither fetch nor post — no regression."""
+    fake = _FakeGitHub('password = "leak"')
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_: float) -> None:
+        await real_sleep(0)
+
+    async def _run() -> None:
+        queue = JobQueue()
+        await queue.enqueue({"repo": "hello", "pr_number": 9})  # no owner
+        worker = BackgroundWorker(queue)
+
+        original_sleep = bw_module.asyncio.sleep
+        bw_module.asyncio.sleep = fast_sleep
+        task = asyncio.create_task(worker.start())
+        for _ in range(500):
+            if queue._queue.qsize() == 0:
+                break
+            await real_sleep(0)
+        # give the loop a couple ticks past dequeue to finish processing
+        for _ in range(10):
+            await real_sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        bw_module.asyncio.sleep = original_sleep
+
+    asyncio.run(_run())
+
+    assert fake.fetched_with is None
+    assert fake.posted == []
+    # Still analyzed (empty code -> LOW) and printed the one-liner.
+    assert "PR #9 Risk: LOW" in capsys.readouterr().out

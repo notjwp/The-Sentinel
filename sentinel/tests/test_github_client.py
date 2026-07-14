@@ -248,3 +248,97 @@ def test_post_comment_rejects_empty_inputs():
     assert client.post_comment("", "repo", 1, "body") is False
     assert client.post_comment("octo", "", 1, "body") is False
     assert client.post_comment("octo", "repo", 1, "") is False
+
+
+# --- PR fetch (M1) ---------------------------------------------------------
+
+
+def test_added_lines_from_patch_extracts_added_code_only():
+    patch = (
+        "@@ -1,3 +1,4 @@\n"
+        "+++ b/app.py\n"          # file header must be ignored
+        " unchanged = 1\n"        # context line dropped
+        "-removed = 2\n"          # removed line dropped
+        "+password = \"hunter2\"\n"
+        "+api_key = \"sk-abc\"\n"
+    )
+
+    result = GitHubClient._added_lines_from_patch(patch)
+
+    assert result == 'password = "hunter2"\napi_key = "sk-abc"'
+
+
+@pytest.mark.parametrize("patch", [None, "", 123, [], "@@ -1 +1 @@\n context"])
+def test_added_lines_from_patch_safe_for_non_added_content(patch):
+    assert GitHubClient._added_lines_from_patch(patch) == ""
+
+
+def test_http_json_list_returns_list_empty_and_none(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="1", private_key="private")
+
+    _patch_imports(monkeypatch, response_payload=b'[{"filename": "a.py"}]')
+    assert client._http_json_list("GET", "https://api.github.com/x", headers={}) == [
+        {"filename": "a.py"}
+    ]
+
+    _patch_imports(monkeypatch, response_payload=b"")
+    assert client._http_json_list("GET", "https://api.github.com/x", headers={}) == []
+
+    # A dict body (not a list) must not be surfaced as a list.
+    _patch_imports(monkeypatch, response_payload=b'{"message": "not found"}')
+    assert client._http_json_list("GET", "https://api.github.com/x", headers={}) is None
+
+    _patch_imports(monkeypatch, urlopen_error=_FakeURLError("network"))
+    assert client._http_json_list("GET", "https://api.github.com/x", headers={}) is None
+
+
+def test_get_pull_request_files_success_and_failures(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    def fake_list(method, url, headers, data=None):
+        assert method == "GET"
+        assert url.endswith("/repos/octo/repo/pulls/7/files?per_page=100")
+        assert headers["Authorization"] == "token installation-token"
+        return [{"filename": "a.py", "patch": "+x = 1"}, "junk", {"filename": "b.py"}]
+
+    monkeypatch.setattr(client, "_http_json_list", fake_list)
+    files = client.get_pull_request_files("octo", "repo", 7)
+    assert files == [{"filename": "a.py", "patch": "+x = 1"}, {"filename": "b.py"}]
+
+    # None response -> []
+    monkeypatch.setattr(client, "_http_json_list", lambda *a, **k: None)
+    assert client.get_pull_request_files("octo", "repo", 7) == []
+
+
+def test_get_pull_request_files_returns_empty_without_owner_or_token(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+    assert client.get_pull_request_files("", "repo", 7) == []
+    assert client.get_pull_request_files("octo", "", 7) == []
+
+    monkeypatch.setattr(client, "_get_installation_token", lambda: None)
+    assert client.get_pull_request_files("octo", "repo", 7) == []
+
+
+def test_get_pull_request_code_assembles_added_lines(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+
+    monkeypatch.setattr(
+        client,
+        "get_pull_request_files",
+        lambda owner, repo, pr_number: [
+            {"filename": "a.py", "patch": "@@ -0,0 +1 @@\n+import os\n+os.system(cmd)"},
+            {"filename": "bin.png"},  # no patch -> skipped
+            {"filename": "b.py", "patch": "+value = 2"},
+        ],
+    )
+
+    code = client.get_pull_request_code("octo", "repo", 7)
+    assert code == "import os\nos.system(cmd)\nvalue = 2"
+
+
+def test_get_pull_request_code_empty_when_no_files(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "get_pull_request_files", lambda *a, **k: [])
+    assert client.get_pull_request_code("octo", "repo", 7) == ""

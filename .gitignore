@@ -34,6 +34,9 @@ mutants/
 # Subagent-driven-development scratch workspace (briefs, reports, review packages, ledger)
 .superpowers/
 
+# Local architecture design doc (HLD + LLD), kept out of the repo
+ARCHITECTURE.md
+
 # Logs
 *.log
 

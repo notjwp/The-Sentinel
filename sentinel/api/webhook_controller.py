@@ -247,6 +247,8 @@ async def _webhook_impl(
         queued_payload: dict[str, Any] = {}
         if payload.repo is not None:
             queued_payload["repo"] = payload.repo
+            if "/" in payload.repo:
+                queued_payload["owner"] = payload.repo.split("/", 1)[0]
         if payload.pr_number is not None:
             queued_payload["pr_number"] = payload.pr_number
         if payload.author is not None:
@@ -394,6 +396,8 @@ async def _webhook_impl(
     if not queued_payload:
         if repo_name is not None:
             queued_payload["repo"] = repo_name
+        if owner is not None:
+            queued_payload["owner"] = owner
         if pr_number is not None:
             queued_payload["pr_number"] = pr_number
         if author is not None:
@@ -440,6 +444,8 @@ async def webhook(
         queued_payload: dict[str, Any] = {}
         if payload.repo is not None:
             queued_payload["repo"] = payload.repo
+            if "/" in payload.repo:
+                queued_payload["owner"] = payload.repo.split("/", 1)[0]
         if payload.pr_number is not None:
             queued_payload["pr_number"] = payload.pr_number
         if payload.author is not None:
@@ -471,11 +477,14 @@ async def webhook(
         pr_number = _extract_pr_number(raw_payload, payload.pr_number)
         author = _extract_author(raw_payload, payload.author)
         files = _extract_files(raw_payload, payload.files)
+        owner = _extract_owner(raw_payload, payload.repo)
 
         queued_payload = payload.model_dump(exclude_none=True)
         if not queued_payload:
             if repo_name is not None:
                 queued_payload["repo"] = repo_name
+            if owner is not None:
+                queued_payload["owner"] = owner
             if pr_number is not None:
                 queued_payload["pr_number"] = pr_number
             if author is not None:

@@ -57,6 +57,8 @@ class AuditOrchestrator:
             "pr_number": pr_number,
         }
 
+        if "owner" in payload:
+            job["owner"] = payload["owner"]
         if "author" in payload:
             job["author"] = payload["author"]
         if "files" in payload:

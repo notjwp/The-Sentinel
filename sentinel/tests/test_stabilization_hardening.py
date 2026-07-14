@@ -60,6 +60,7 @@ def test_orchestrator_includes_supported_optional_fields():
         orchestrator = AuditOrchestrator(queue)
         payload = {
             "repo": "my-repo",
+            "owner": "octo",
             "pr_number": 7,
             "author": "alice",
             "files": ["a.py", "b.py"],
@@ -68,6 +69,7 @@ def test_orchestrator_includes_supported_optional_fields():
         }
         await orchestrator.enqueue_pull_request(payload)
         job = await queue.dequeue()
+        assert job["owner"] == "octo"
         assert job["author"] == "alice"
         assert job["files"] == ["a.py", "b.py"]
         assert job["code"] == "def x():\n    return 1"

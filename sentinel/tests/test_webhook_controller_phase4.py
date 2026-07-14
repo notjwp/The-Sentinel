@@ -273,7 +273,9 @@ def test_webhook_async_mode_with_github_payload_populates_queue_fields(monkeypat
     )
 
     assert result == {"status": "queued"}
-    assert orchestrator.enqueued == [{"repo": "repo", "pr_number": 4, "author": "alice", "files": ["README.md"]}]
+    assert orchestrator.enqueued == [
+        {"repo": "repo", "owner": "octo", "pr_number": 4, "author": "alice", "files": ["README.md"]}
+    ]
 
 
 def test_webhook_sync_mode_with_code_and_github_enabled_posts_comment(monkeypatch):
