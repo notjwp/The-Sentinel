@@ -13,6 +13,7 @@ from sentinel.infrastructure.github.github_client import GitHubClient
 from sentinel.infrastructure.llm.llm_service import LLMService
 from sentinel.infrastructure.semantic.embedding_engine import EmbeddingEngine
 from sentinel.monitoring.logger import get_logger
+from sentinel.monitoring.metrics import metrics
 from sentinel.workers.job_queue import JobQueue
 
 logger = get_logger(__name__)
@@ -273,6 +274,10 @@ class BackgroundWorker:
                 semantic_findings_count=assessment.get("semantic_findings_count"),
             )
             posted = github_client.upsert_comment(owner, repo_name, pr_number, report)
+            metrics.counter_inc(
+                "sentinel_github_posts_total",
+                {"kind": "comment", "outcome": "ok" if posted else "failed"},
+            )
             logger.info(
                 "Worker posted review comment=%s repo=%s pr=%s", posted, repo_name, pr_number
             )
@@ -297,6 +302,10 @@ class BackgroundWorker:
                     summary=payload["summary"],
                     text=report,
                     annotations=payload["annotations"],
+                )
+                metrics.counter_inc(
+                    "sentinel_github_posts_total",
+                    {"kind": "check_run", "outcome": "ok" if check_posted else "failed"},
                 )
                 logger.info(
                     "Worker posted check run=%s repo=%s pr=%s",
@@ -324,7 +333,12 @@ class BackgroundWorker:
         self._fetch_pr_data(job, github_client)
 
         pull_request, assessment = self._assess(job, risk_engine)
-        report_line = self._format_risk_line(pull_request.pr_number, assessment["severity"])
+        risk = assessment["severity"]
+        report_line = self._format_risk_line(pull_request.pr_number, risk)
+        metrics.counter_inc(
+            "sentinel_reviews_total",
+            {"severity": risk.value if isinstance(risk, SeverityLevel) else str(risk).upper()},
+        )
 
         logger.info("%s", report_line)
         sys.stdout.write(f"{report_line}\n")
@@ -332,7 +346,9 @@ class BackgroundWorker:
 
         self._post_review(job, assessment, orchestrator, github_client)
 
-        logger.info("Processed job in %.4fs", time.monotonic() - start_time)
+        elapsed = time.monotonic() - start_time
+        metrics.observe("sentinel_job_duration_seconds", elapsed)
+        logger.info("Processed job in %.4fs", elapsed)
 
     async def start(self) -> None:
         embedding_engine = EmbeddingEngine()
@@ -367,6 +383,7 @@ class BackgroundWorker:
                 # leaves it in the processing list for recovery on next start.
                 await self.queue.ack(job)
                 self.processed_count += 1
+                metrics.counter_inc("sentinel_jobs_processed_total")
             except Exception:
                 logger.exception("Worker failed to process job; continuing")
             await asyncio.sleep(2)

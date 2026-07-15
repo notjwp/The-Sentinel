@@ -20,6 +20,7 @@ from sentinel.infrastructure.github.github_client import GitHubClient
 from sentinel.infrastructure.llm.llm_service import LLMService
 from sentinel.infrastructure.redis.redis_delivery_dedup import RedisDeliveryDeduper
 from sentinel.monitoring.logger import get_logger
+from sentinel.monitoring.metrics import metrics
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -391,6 +392,7 @@ async def _webhook_impl(
         except Exception:
             logger.exception("Failed to enqueue webhook payload")
             raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
+        metrics.counter_inc("sentinel_webhooks_total", {"mode": "queued"})
         return {"status": "queued"}
 
     try:
@@ -469,6 +471,7 @@ async def _webhook_impl(
     except Exception:
         logger.exception("Failed to enqueue webhook payload")
         raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
+    metrics.counter_inc("sentinel_webhooks_total", {"mode": "queued"})
     return {"status": "queued"}
 
 
@@ -496,6 +499,7 @@ async def webhook(
     delivery_id = request.headers.get("X-GitHub-Delivery")
     if await _deduper.is_duplicate(delivery_id):
         logger.info("Duplicate delivery %s skipped", delivery_id)
+        metrics.counter_inc("sentinel_webhooks_total", {"mode": "duplicate"})
         return {"status": "duplicate"}
 
     has_explicit_code = isinstance(payload.code, str) and payload.code.strip() != ""
@@ -523,6 +527,7 @@ async def webhook(
         except Exception:
             logger.exception("Failed to enqueue webhook payload")
             raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
+        metrics.counter_inc("sentinel_webhooks_total", {"mode": "queued"})
         return {"status": "queued"}
 
     try:
@@ -563,6 +568,7 @@ async def webhook(
         except Exception:
             logger.exception("Failed to enqueue webhook payload")
             raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
+        metrics.counter_inc("sentinel_webhooks_total", {"mode": "queued"})
         return {"status": "queued"}
 
     security_service = _resolve_override(request, get_security_service)
@@ -571,7 +577,7 @@ async def webhook(
     document_service = _resolve_override(request, get_document_service)
     github_client = _resolve_override(request, get_github_client)
 
-    return await _webhook_impl(
+    result = await _webhook_impl(
         request,
         payload,
         orchestrator,
@@ -581,3 +587,6 @@ async def webhook(
         document_service,
         github_client,
     )
+    if isinstance(result, dict) and result.get("status") == "processed":
+        metrics.counter_inc("sentinel_webhooks_total", {"mode": "sync"})
+    return result

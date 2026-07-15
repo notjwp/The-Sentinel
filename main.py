@@ -14,6 +14,7 @@ from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.api.webhook_controller import router as webhook_router
 from sentinel.api.webhook_controller import get_orchestrator
 from sentinel.api.health_controller import router as health_router
+from sentinel.api.metrics_controller import router as metrics_router
 from sentinel.config.settings import get_settings
 from sentinel.infrastructure.redis.redis_job_queue import RedisJobQueue
 from sentinel.monitoring.logger import get_logger
@@ -54,9 +55,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="The Sentinel", lifespan=lifespan)
 
 app.dependency_overrides[get_orchestrator] = lambda: audit_orchestrator
+app.state.job_queue = job_queue  # /metrics reads live queue depth from here
 
 app.include_router(webhook_router)
 app.include_router(health_router)
+app.include_router(metrics_router)
 
 
 @app.get("/")

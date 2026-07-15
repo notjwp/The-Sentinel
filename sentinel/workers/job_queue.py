@@ -28,3 +28,7 @@ class JobQueue:
     async def recover_pending(self) -> int:
         """No-op counterpart to RedisJobQueue.recover_pending. Nothing to recover."""
         return 0
+
+    async def depth(self) -> int:
+        """Jobs currently waiting (the /metrics queue-depth gauge)."""
+        return self._queue.qsize()

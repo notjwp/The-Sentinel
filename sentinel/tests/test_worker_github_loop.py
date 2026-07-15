@@ -315,6 +315,49 @@ def test_worker_posts_check_run_with_line_mapped_annotations(monkeypatch, capsys
     assert "PR #13 Risk: HIGH" in capsys.readouterr().out
 
 
+def test_worker_records_metrics(monkeypatch, capsys):
+    """M7: one processed job populates the whole counter/summary set."""
+    from sentinel.monitoring.metrics import metrics
+
+    metrics.reset()
+    fake = _FakeGitHub('password = "hunter2"')
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_: float) -> None:
+        await real_sleep(0)
+
+    async def _run() -> None:
+        queue = JobQueue()
+        await queue.enqueue({"owner": "octo", "repo": "hello", "pr_number": 15})
+        worker = BackgroundWorker(queue)
+        original_sleep = bw_module.asyncio.sleep
+        bw_module.asyncio.sleep = fast_sleep
+        task = asyncio.create_task(worker.start())
+        for _ in range(500):
+            if worker.processed_count >= 1:
+                break
+            await real_sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        bw_module.asyncio.sleep = original_sleep
+
+    asyncio.run(_run())
+
+    snap = metrics.snapshot()
+    assert snap["counters"]["sentinel_jobs_processed_total"] == 1
+    assert snap["counters"]['sentinel_reviews_total{severity="HIGH"}'] == 1
+    assert snap["counters"]['sentinel_github_posts_total{kind="comment",outcome="ok"}'] == 1
+    assert snap["counters"]['sentinel_github_posts_total{kind="check_run",outcome="ok"}'] == 1
+    assert snap["summaries"]["sentinel_job_duration_seconds"]["count"] == 1
+    capsys.readouterr()
+
+
 def test_worker_skips_check_run_when_flag_off(monkeypatch, capsys):
     """ENABLE_CHECKS=false: the comment posts, no check run is created."""
     monkeypatch.setenv("ENABLE_CHECKS", "false")

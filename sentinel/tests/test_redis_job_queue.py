@@ -2,11 +2,12 @@
 
 No live Redis needed: fakeredis.FakeAsyncRedis is injected through the client
 seam. A shared FakeServer stands in for "the same Redis across two processes"
-in the crash-recovery test.
+in the crash-recovery test. M7 adds outage log-hygiene/backoff and depth tests.
 """
 
 import asyncio
 import json
+import logging
 
 import fakeredis
 import pytest
@@ -115,6 +116,120 @@ def test_dequeue_waits_until_a_job_arrives():
         assert job == {"repo": "late", "pr_number": 9}
 
     asyncio.run(_run())
+
+
+def test_depth_reports_waiting_jobs_and_minus_one_on_error():
+    async def _run() -> None:
+        queue = _queue()
+        assert await queue.depth() == 0
+        for pr in (1, 2, 3):
+            await queue.enqueue({"repo": "d", "pr_number": pr})
+        assert await queue.depth() == 3
+
+        class _Broken:
+            async def llen(self, *a):
+                raise ConnectionError("down")
+
+        broken = RedisJobQueue("redis://unused", client=_Broken())
+        assert await broken.depth() == -1
+
+    asyncio.run(_run())
+
+
+class _AlwaysFailingClient:
+    async def lmove(self, *args, **kwargs):
+        raise ConnectionError("redis is down")
+
+
+_LOGGER_NAME = "sentinel.infrastructure.redis.redis_job_queue"
+
+
+def _drive_failing_dequeue(queue: RedisJobQueue, min_sleeps: int, monkeypatch) -> list[float]:
+    """Run dequeue against a dead client until it has backed off min_sleeps times."""
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def _run() -> None:
+        task = asyncio.create_task(queue.dequeue())
+        while len(sleeps) < min_sleeps:
+            await real_sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    return sleeps
+
+
+def test_outage_backoff_grows_and_traceback_logged_once(caplog, monkeypatch):
+    queue = RedisJobQueue(
+        "redis://unused", client=_AlwaysFailingClient(), poll_interval=0.01
+    )
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        sleeps = _drive_failing_dequeue(queue, min_sleeps=12, monkeypatch=monkeypatch)
+
+    # Backoff: 0.01 * 2**n, capped, never shrinking while failing.
+    assert sleeps[0] == pytest.approx(0.02)
+    assert max(sleeps) == RedisJobQueue.MAX_BACKOFF_SECONDS
+    assert sleeps == sorted(sleeps)
+
+    # One traceback for the whole streak; summaries suppressed inside the window.
+    tracebacks = [r for r in caplog.records if r.exc_info]
+    assert len(tracebacks) == 1
+    assert sum("still unreachable" in r.message for r in caplog.records) == 0
+
+
+def test_outage_summary_line_after_suppress_window(caplog, monkeypatch):
+    monkeypatch.setattr(RedisJobQueue, "LOG_SUPPRESS_SECONDS", 0.0)
+    queue = RedisJobQueue("redis://unused", client=_AlwaysFailingClient(), poll_interval=0.01)
+    with caplog.at_level(logging.ERROR, logger=_LOGGER_NAME):
+        _drive_failing_dequeue(queue, min_sleeps=5, monkeypatch=monkeypatch)
+    assert sum("still unreachable" in r.message for r in caplog.records) >= 1
+
+
+class _FlakyClient:
+    def __init__(self, failures: int, raw: str) -> None:
+        self._failures = failures
+        self._raw = raw
+
+    async def lmove(self, *args, **kwargs):
+        if self._failures > 0:
+            self._failures -= 1
+            raise ConnectionError("redis is down")
+        return self._raw
+
+    async def lrem(self, *args, **kwargs):
+        return 1
+
+
+def test_dequeue_recovers_and_logs_reconnect(caplog, monkeypatch):
+    raw = json.dumps({"id": "r1", "job": {"repo": "back", "pr_number": 9}})
+    queue = RedisJobQueue(
+        "redis://unused", client=_FlakyClient(failures=3, raw=raw), poll_interval=0.01
+    )
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        job = asyncio.run(queue.dequeue())
+
+    assert job == {"repo": "back", "pr_number": 9}
+    assert len(sleeps) == 3  # one backoff per failure, then success
+    assert any("Redis reconnected after 3 failed attempt(s)" in r.message for r in caplog.records)
 
 
 def test_poison_messages_are_discarded_and_valid_job_still_served():

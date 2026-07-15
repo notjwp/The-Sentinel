@@ -14,12 +14,14 @@ upsert and assessment is deterministic.
 
 import asyncio
 import json
+import time
 import uuid
 from typing import Any
 
 import redis.asyncio as redis_asyncio
 
 from sentinel.monitoring.logger import get_logger
+from sentinel.monitoring.metrics import metrics
 
 logger = get_logger(__name__)
 
@@ -27,6 +29,10 @@ logger = get_logger(__name__)
 class RedisJobQueue:
     QUEUE_KEY = "sentinel:jobs"
     PROCESSING_KEY = "sentinel:jobs:processing"
+    # Outage hygiene: one traceback per failing streak, then at most one summary
+    # line per suppress window; retry sleeps back off exponentially to the cap.
+    LOG_SUPPRESS_SECONDS = 60.0
+    MAX_BACKOFF_SECONDS = 5.0
 
     def __init__(
         self,
@@ -41,6 +47,8 @@ class RedisJobQueue:
             url, decode_responses=True
         )
         self._poll_interval = poll_interval
+        self._consecutive_failures = 0
+        self._last_failure_log = 0.0
         # (job, raw message) for jobs handed out but not yet acked, keyed by the
         # returned dict's id(). Holding the job itself keeps the dict alive, so
         # its id() can never be reused by a later job while the entry exists;
@@ -58,6 +66,23 @@ class RedisJobQueue:
         await self._client.lpush(self.QUEUE_KEY, raw)
         logger.info("Job enqueued (redis)")
 
+    def _backoff_seconds(self) -> float:
+        exponent = min(self._consecutive_failures, 10)  # cap 2**n growth
+        return min(self._poll_interval * (2**exponent), self.MAX_BACKOFF_SECONDS)
+
+    def _log_dequeue_failure(self) -> None:
+        """Traceback once per failing streak, then one line per suppress window."""
+        now = time.monotonic()
+        if self._consecutive_failures == 1:
+            logger.exception("Redis dequeue failed; backing off and retrying")
+            self._last_failure_log = now
+        elif now - self._last_failure_log >= self.LOG_SUPPRESS_SECONDS:
+            logger.error(
+                "Redis still unreachable (attempt %s); continuing to retry",
+                self._consecutive_failures,
+            )
+            self._last_failure_log = now
+
     async def dequeue(self) -> dict:
         # Poll with non-blocking LMOVE rather than BLMOVE: cancellation-friendly,
         # resilient to Redis restarts, and exercisable on fakeredis.
@@ -67,9 +92,19 @@ class RedisJobQueue:
                     self.QUEUE_KEY, self.PROCESSING_KEY, "RIGHT", "LEFT"
                 )
             except Exception:
-                logger.exception("Redis dequeue failed; retrying")
-                await asyncio.sleep(self._poll_interval)
+                self._consecutive_failures += 1
+                metrics.counter_inc("sentinel_redis_errors_total", {"op": "dequeue"})
+                self._log_dequeue_failure()
+                await asyncio.sleep(self._backoff_seconds())
                 continue
+
+            if self._consecutive_failures:
+                logger.info(
+                    "Redis reconnected after %s failed attempt(s)",
+                    self._consecutive_failures,
+                )
+                self._consecutive_failures = 0
+                self._last_failure_log = 0.0
 
             if raw is not None:
                 job = self._parse_job(raw)
@@ -95,6 +130,7 @@ class RedisJobQueue:
         try:
             await self._client.lrem(self.PROCESSING_KEY, 1, raw)
         except Exception:
+            metrics.counter_inc("sentinel_redis_errors_total", {"op": "ack"})
             logger.exception("Redis ack failed; job will be re-queued on next restart")
 
     async def recover_pending(self) -> int:
@@ -106,6 +142,7 @@ class RedisJobQueue:
                     self.PROCESSING_KEY, self.QUEUE_KEY, "RIGHT", "LEFT"
                 )
             except Exception:
+                metrics.counter_inc("sentinel_redis_errors_total", {"op": "recover"})
                 logger.exception("Redis recovery failed; continuing with %s recovered", recovered)
                 break
             if raw is None:
@@ -114,6 +151,13 @@ class RedisJobQueue:
         if recovered:
             logger.info("Recovered %s orphaned job(s) from the processing list", recovered)
         return recovered
+
+    async def depth(self) -> int:
+        """Jobs currently waiting (the /metrics queue-depth gauge). -1 on error."""
+        try:
+            return int(await self._client.llen(self.QUEUE_KEY))
+        except Exception:
+            return -1
 
     @staticmethod
     def _parse_job(raw: str) -> dict | None:

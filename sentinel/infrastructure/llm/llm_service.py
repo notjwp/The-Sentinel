@@ -3,6 +3,7 @@ import re
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.infrastructure.llm.base import LLMProvider
 from sentinel.infrastructure.llm.nim_provider import NIMProvider
+from sentinel.monitoring.metrics import metrics
 
 
 def _get_logger(name: str):
@@ -151,6 +152,8 @@ class LLMService:
 
         if not enrichable or not self._can_invoke():
             self.logger.info("LLM skipped; using fallback response.")
+            if enrichable:  # a real fallback; nothing-to-enrich is not one
+                metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "fallback"})
             return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
 
         summary_lines = []
@@ -167,14 +170,17 @@ class LLMService:
         except Exception:
             self.logger.exception("LLM request failed; using fallback response.")
             self.logger.info("Fallback triggered")
+            metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "fallback"})
             return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
 
         if not content or not str(content).strip():
             self.logger.warning("LLM returned empty content; using fallback response.")
             self.logger.info("Fallback triggered")
+            metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "fallback"})
             return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
 
         self.logger.info("LLM response received")
+        metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "success"})
         parsed = self._parse_pr_audit_response(str(content), [id(f) for f in enrichable])
 
         self.logger.info(f"Parsed {len(parsed)} issue explanations")
