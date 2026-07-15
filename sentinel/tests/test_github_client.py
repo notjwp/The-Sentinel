@@ -298,7 +298,7 @@ def test_get_pull_request_files_success_and_failures(monkeypatch):
 
     def fake_list(method, url, headers, data=None):
         assert method == "GET"
-        assert url.endswith("/repos/octo/repo/pulls/7/files?per_page=100")
+        assert url.endswith("/repos/octo/repo/pulls/7/files?per_page=100&page=1")
         assert headers["Authorization"] == "token installation-token"
         return [{"filename": "a.py", "patch": "+x = 1"}, "junk", {"filename": "b.py"}]
 
@@ -350,7 +350,7 @@ def test_list_issue_comments_success_and_failures(monkeypatch):
 
     def fake_list(method, url, headers, data=None):
         assert method == "GET"
-        assert url.endswith("/repos/octo/repo/issues/7/comments?per_page=100")
+        assert url.endswith("/repos/octo/repo/issues/7/comments?per_page=100&page=1")
         assert headers["Authorization"] == "token installation-token"
         return [{"id": 1, "body": "hi"}, "junk", {"id": 2, "body": "yo"}]
 
@@ -488,3 +488,118 @@ def test_upsert_comment_rejects_empty_inputs():
     assert client.upsert_comment("", "repo", 1, "body") is False
     assert client.upsert_comment("octo", "", 1, "body") is False
     assert client.upsert_comment("octo", "repo", 1, "") is False
+
+
+def test_paginated_assembles_multiple_pages(monkeypatch):
+    """A full page (100 items) triggers a second request; a short page ends the loop."""
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    requested_urls: list[str] = []
+
+    def fake_list(method, url, headers, data=None):
+        requested_urls.append(url)
+        if url.endswith("&page=1"):
+            return [{"id": i} for i in range(100)]
+        return [{"id": 100}, {"id": 101}, {"id": 102}]
+
+    monkeypatch.setattr(client, "_http_json_list", fake_list)
+    comments = client.list_issue_comments("octo", "repo", 7)
+
+    assert len(comments) == 103
+    assert len(requested_urls) == 2
+    assert requested_urls[0].endswith("?per_page=100&page=1")
+    assert requested_urls[1].endswith("?per_page=100&page=2")
+
+
+def test_paginated_stops_at_page_cap(monkeypatch):
+    """Endless full pages stop at MAX_LIST_PAGES rather than looping forever."""
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    calls = {"n": 0}
+
+    def always_full(method, url, headers, data=None):
+        calls["n"] += 1
+        return [{"id": i} for i in range(100)]
+
+    monkeypatch.setattr(client, "_http_json_list", always_full)
+    files = client.get_pull_request_files("octo", "repo", 7)
+
+    assert calls["n"] == GitHubClient.MAX_LIST_PAGES
+    assert len(files) == 100 * GitHubClient.MAX_LIST_PAGES
+
+
+def test_paginated_keeps_partial_results_on_mid_pagination_error(monkeypatch):
+    """An error (None) on page 2 returns page 1's items, not []."""
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    def fake_list(method, url, headers, data=None):
+        if url.endswith("&page=1"):
+            return [{"id": i} for i in range(100)]
+        return None
+
+    monkeypatch.setattr(client, "_http_json_list", fake_list)
+    comments = client.list_issue_comments("octo", "repo", 7)
+
+    assert len(comments) == 100
+    assert comments[0] == {"id": 0}
+
+
+def test_upsert_comment_finds_marked_comment_on_second_page(monkeypatch):
+    """Sentinel's marker beyond page 1 is still found -> PATCH, not a duplicate POST."""
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    marker = GitHubClient.SENTINEL_COMMENT_MARKER
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    def fake_list(method, url, headers, data=None):
+        if url.endswith("&page=1"):
+            return [{"id": i, "body": f"human comment {i}"} for i in range(100)]
+        return [{"id": 200, "body": f"{marker}\n# old Sentinel review"}]
+
+    calls: dict[str, object] = {}
+
+    def fake_update(owner, repo, comment_id, body):
+        calls["update"] = comment_id
+        return True
+
+    monkeypatch.setattr(client, "_http_json_list", fake_list)
+    monkeypatch.setattr(client, "update_comment", fake_update)
+    monkeypatch.setattr(client, "post_comment", lambda *a, **k: pytest.fail("should not create"))
+
+    assert client.upsert_comment("octo", "repo", 7, "# fresh review") is True
+    assert calls["update"] == 200
+
+
+def test_get_pull_request_data_assembles_names_contents_and_code(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+
+    monkeypatch.setattr(
+        client,
+        "get_pull_request_files",
+        lambda owner, repo, pr_number: [
+            {"filename": "a.py", "patch": "@@ -0,0 +1 @@\n+import os\n+os.system(cmd)"},
+            {"filename": "bin.png"},  # no patch -> listed in files, absent from contents
+            {"filename": "README.md", "patch": "+# Title"},
+        ],
+    )
+
+    data = client.get_pull_request_data("octo", "repo", 7)
+
+    assert data["files"] == ["a.py", "bin.png", "README.md"]
+    assert data["file_contents"] == {
+        "a.py": "@@ -0,0 +1 @@\n+import os\n+os.system(cmd)",
+        "README.md": "+# Title",
+    }
+    assert data["code"] == "import os\nos.system(cmd)\n# Title"
+
+
+def test_get_pull_request_data_empty_when_no_files(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "get_pull_request_files", lambda *a, **k: [])
+    assert client.get_pull_request_data("octo", "repo", 7) == {
+        "code": "",
+        "files": [],
+        "file_contents": {},
+    }

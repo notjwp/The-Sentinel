@@ -6,6 +6,7 @@ from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
 from sentinel.config.settings import Settings, get_settings
 from sentinel.domain.entities.pull_request import PullRequest
+from sentinel.domain.services.document_service import DocumentService
 from sentinel.domain.services.semantic_service import SemanticService
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.infrastructure.github.github_client import GitHubClient
@@ -78,6 +79,9 @@ def _safe_assessment() -> dict:
 class BackgroundWorker:
     def __init__(self, queue: JobQueue) -> None:
         self.queue = queue
+        # Count of jobs whose processing has fully completed. Deterministic completion
+        # signal (used by tests) and basic throughput observability.
+        self.processed_count = 0
 
     @staticmethod
     def _format_risk_line(pr_number: object, risk: object) -> str:
@@ -166,26 +170,40 @@ class BackgroundWorker:
         return owner, repo_name, job.get("pr_number")
 
     @staticmethod
-    def _fetch_pr_code(job: dict, github_client: GitHubClient | None) -> None:
-        """Populate ``job['code']`` from the PR's diff when possible. Failure-safe."""
+    def _fetch_pr_data(job: dict, github_client: GitHubClient | None) -> None:
+        """Populate ``job['code']``/``files``/``file_contents`` from the PR. Failure-safe.
+
+        Fetched data wins over payload-supplied values when non-empty; payload values
+        are kept otherwise.
+        """
         if github_client is None or job.get("code"):
             return
         owner, repo_name, pr_number = BackgroundWorker._identity(job)
         if not owner or not repo_name or pr_number is None:
             return
         try:
-            fetched = github_client.get_pull_request_code(owner, repo_name, pr_number)
+            fetched = github_client.get_pull_request_data(owner, repo_name, pr_number)
         except Exception:
-            logger.exception("Failed to fetch PR code for repo=%s pr=%s", repo_name, pr_number)
+            logger.exception("Failed to fetch PR data for repo=%s pr=%s", repo_name, pr_number)
             return
-        if fetched and fetched.strip():
-            job["code"] = fetched
-            logger.info(
-                "Fetched %s chars of PR code for repo=%s pr=%s",
-                len(fetched),
-                repo_name,
-                pr_number,
-            )
+
+        code = fetched.get("code")
+        if isinstance(code, str) and code.strip():
+            job["code"] = code
+        files = fetched.get("files")
+        if isinstance(files, list) and files:
+            job["files"] = files
+        file_contents = fetched.get("file_contents")
+        if isinstance(file_contents, dict) and file_contents:
+            job["file_contents"] = file_contents
+
+        logger.info(
+            "Fetched %s chars of PR code across %s files for repo=%s pr=%s",
+            len(code) if isinstance(code, str) else 0,
+            len(files) if isinstance(files, list) else 0,
+            repo_name,
+            pr_number,
+        )
 
     @staticmethod
     def _post_review(
@@ -203,10 +221,14 @@ class BackgroundWorker:
         try:
             security = assessment.get("security", {})
             findings = security.get("findings", []) if isinstance(security, dict) else []
-            enriched = orchestrator.enrich_findings_with_llm(job.get("code", ""), findings)
-            report = orchestrator.build_report(
-                enriched,
-                assessment["severity"],
+            # Same entry point as the sync webhook path: LLM enrichment + document
+            # findings + (flag-gated) translations, so async reviews have full parity.
+            _, report = orchestrator.run_full_review(
+                code=job.get("code", ""),
+                findings=findings,
+                risk=assessment["severity"],
+                files=job.get("files"),
+                file_contents=job.get("file_contents"),
                 complexity=assessment.get("complexity"),
                 maintainability=assessment.get("maintainability"),
                 semantic_findings_count=assessment.get("semantic_findings_count"),
@@ -218,6 +240,33 @@ class BackgroundWorker:
         except Exception:
             logger.exception("Failed to post PR review for repo=%s pr=%s", repo_name, pr_number)
 
+    def _process_one(
+        self,
+        job: dict,
+        risk_engine: RiskEngine,
+        orchestrator: AuditOrchestrator,
+        github_client: GitHubClient | None,
+    ) -> None:
+        """Run one job's full blocking pipeline: fetch -> assess -> emit -> post.
+
+        Entirely synchronous/blocking (GitHub urllib + sklearn + openai). ``start``
+        runs it via ``asyncio.to_thread`` so none of it executes on the event loop.
+        """
+        start_time = time.monotonic()
+
+        self._fetch_pr_data(job, github_client)
+
+        pull_request, assessment = self._assess(job, risk_engine)
+        report_line = self._format_risk_line(pull_request.pr_number, assessment["severity"])
+
+        logger.info("%s", report_line)
+        sys.stdout.write(f"{report_line}\n")
+        sys.stdout.flush()
+
+        self._post_review(job, assessment, orchestrator, github_client)
+
+        logger.info("Processed job in %.4fs", time.monotonic() - start_time)
+
     async def start(self) -> None:
         embedding_engine = EmbeddingEngine()
         semantic_service = SemanticService(embedding_engine)
@@ -226,30 +275,21 @@ class BackgroundWorker:
         settings = get_settings()
         github_client = _build_github_client(settings)
         llm_service = _build_llm_service(settings)
-        orchestrator = AuditOrchestrator(self.queue, llm_service=llm_service)
+        orchestrator = AuditOrchestrator(
+            self.queue,
+            llm_service=llm_service,
+            document_service=DocumentService(),
+        )
 
         while True:
             try:
                 job = await self.queue.dequeue()
-                start_time = time.monotonic()
-
-                self._fetch_pr_code(job, github_client)
-
-                pull_request, assessment = self._assess(job, risk_engine)
-                report_line = self._format_risk_line(
-                    pull_request.pr_number, assessment["severity"]
-                )
-
-                logger.info("%s", report_line)
-                sys.stdout.write(f"{report_line}\n")
-                sys.stdout.flush()
-
+                # Offload the entire blocking pipeline so a slow GitHub GET / LLM call
+                # can never stall the shared event loop (health, webhooks, queue intake).
                 await asyncio.to_thread(
-                    self._post_review, job, assessment, orchestrator, github_client
+                    self._process_one, job, risk_engine, orchestrator, github_client
                 )
-
-                elapsed = time.monotonic() - start_time
-                logger.info("Processed job in %.4fs", elapsed)
+                self.processed_count += 1
             except Exception:
                 logger.exception("Worker failed to process job; continuing")
             await asyncio.sleep(2)

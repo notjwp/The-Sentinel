@@ -15,6 +15,9 @@ class GitHubClient:
     # annotation) so @dataclass treats it as a class attribute, not a field.
     SENTINEL_COMMENT_MARKER = "<!-- sentinel-review -->"
 
+    # Upper bound on pages fetched per list endpoint (10 x per_page=100 = 1000 items).
+    MAX_LIST_PAGES = 10
+
     def __post_init__(self) -> None:
         self._installation_token: str | None = None
         self._installation_token_expiry: float = 0.0
@@ -142,6 +145,23 @@ class GitHubClient:
                 return None
             return None
 
+    def _get_paginated(self, endpoint: str, headers: dict[str, str]) -> list[dict[str, Any]]:
+        """GET all pages of a GitHub list endpoint (up to MAX_LIST_PAGES).
+
+        Failure-safe: a non-list page (error) ends pagination, returning whatever
+        was collected so far — partial results beat none for a best-effort client.
+        """
+        results: list[dict[str, Any]] = []
+        for page in range(1, self.MAX_LIST_PAGES + 1):
+            url = f"{endpoint}?per_page=100&page={page}"
+            batch = self._http_json_list("GET", url, headers, data=None)
+            if not isinstance(batch, list):
+                break
+            results.extend(item for item in batch if isinstance(item, dict))
+            if len(batch) < 100:  # short page == last page
+                break
+        return results
+
     def _get_installation_token(self) -> str | None:
         if self._installation_token and self._now() < (self._installation_token_expiry - 30):
             return self._installation_token
@@ -207,7 +227,7 @@ class GitHubClient:
         return isinstance(response, dict) and isinstance(response.get("id"), int)
 
     def list_issue_comments(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
-        """GET the issue comments on a PR (first page). Returns [] on any failure."""
+        """GET the issue comments on a PR (all pages, capped). Returns [] on any failure."""
         if not owner or not repo:
             return []
 
@@ -217,22 +237,16 @@ class GitHubClient:
 
         endpoint = (
             f"{self.api_base_url.rstrip('/')}/repos/{owner}/{repo}"
-            f"/issues/{pr_number}/comments?per_page=100"
+            f"/issues/{pr_number}/comments"
         )
-        response = self._http_json_list(
-            "GET",
+        return self._get_paginated(
             endpoint,
             headers={
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"token {token}",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
-            data=None,
         )
-
-        if not isinstance(response, list):
-            return []
-        return [item for item in response if isinstance(item, dict)]
 
     def update_comment(self, owner: str, repo: str, comment_id: int, body: str) -> bool:
         """PATCH an existing issue comment in place. Returns False on any failure."""
@@ -307,7 +321,7 @@ class GitHubClient:
         return "\n".join(added)
 
     def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
-        """GET the changed files of a PR (first page). Returns [] on any failure."""
+        """GET the changed files of a PR (all pages, capped). Returns [] on any failure."""
         if not owner or not repo:
             return []
 
@@ -317,29 +331,41 @@ class GitHubClient:
 
         endpoint = (
             f"{self.api_base_url.rstrip('/')}/repos/{owner}/{repo}"
-            f"/pulls/{pr_number}/files?per_page=100"
+            f"/pulls/{pr_number}/files"
         )
-        response = self._http_json_list(
-            "GET",
+        return self._get_paginated(
             endpoint,
             headers={
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"token {token}",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
-            data=None,
         )
 
-        if not isinstance(response, list):
-            return []
-        return [item for item in response if isinstance(item, dict)]
+    def get_pull_request_data(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        """Assemble everything a review needs from one PR-files fetch.
+
+        Returns ``{"code": str, "files": list[str], "file_contents": dict[str, str]}``:
+        added-line code joined across patches, the changed file names, and each file's
+        patch text keyed by name (the doc reviewer's content source, mirroring the sync
+        path's patch fallback). Empty values on failure.
+        """
+        items = self.get_pull_request_files(owner, repo, pr_number)
+        segments: list[str] = []
+        files: list[str] = []
+        file_contents: dict[str, str] = {}
+        for item in items:
+            name = item.get("filename")
+            patch = item.get("patch")
+            if isinstance(name, str) and name:
+                files.append(name)
+                if isinstance(patch, str) and patch:
+                    file_contents[name] = patch
+            added = self._added_lines_from_patch(patch)
+            if added:
+                segments.append(added)
+        return {"code": "\n".join(segments), "files": files, "file_contents": file_contents}
 
     def get_pull_request_code(self, owner: str, repo: str, pr_number: int) -> str:
         """Assemble the added-line code introduced by a PR. Returns "" on failure."""
-        files = self.get_pull_request_files(owner, repo, pr_number)
-        segments: list[str] = []
-        for item in files:
-            added = self._added_lines_from_patch(item.get("patch"))
-            if added:
-                segments.append(added)
-        return "\n".join(segments)
+        return self.get_pull_request_data(owner, repo, pr_number)["code"]

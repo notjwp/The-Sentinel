@@ -13,14 +13,25 @@ from sentinel.workers.job_queue import JobQueue
 
 
 class _FakeGitHub:
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        files: list[str] | None = None,
+        file_contents: dict[str, str] | None = None,
+    ) -> None:
         self._code = code
+        self._files = files or []
+        self._file_contents = file_contents or {}
         self.fetched_with: tuple | None = None
         self.posted: list[tuple] = []
 
-    def get_pull_request_code(self, owner: str, repo: str, pr_number) -> str:
+    def get_pull_request_data(self, owner: str, repo: str, pr_number) -> dict:
         self.fetched_with = (owner, repo, pr_number)
-        return self._code
+        return {
+            "code": self._code,
+            "files": self._files,
+            "file_contents": self._file_contents,
+        }
 
     def post_comment(self, owner: str, repo: str, pr_number, body: str) -> bool:
         self.posted.append((owner, repo, pr_number, body))
@@ -65,7 +76,7 @@ def _drive_one_job(worker: BackgroundWorker, queue: JobQueue, fake: _FakeGitHub)
         for _ in range(500):
             if fake.posted:
                 break
-            await real_sleep(0)
+            await real_sleep(0.01)
         task.cancel()
         try:
             await task
@@ -149,12 +160,9 @@ def test_worker_skips_github_when_no_owner(monkeypatch, capsys):
         bw_module.asyncio.sleep = fast_sleep
         task = asyncio.create_task(worker.start())
         for _ in range(500):
-            if queue._queue.qsize() == 0:
+            if worker.processed_count >= 1:
                 break
-            await real_sleep(0)
-        # give the loop a couple ticks past dequeue to finish processing
-        for _ in range(10):
-            await real_sleep(0)
+            await real_sleep(0.01)
         task.cancel()
         try:
             await task
@@ -168,3 +176,30 @@ def test_worker_skips_github_when_no_owner(monkeypatch, capsys):
     assert fake.posted == []
     # Still analyzed (empty code -> LOW) and printed the one-liner.
     assert "PR #9 Risk: LOW" in capsys.readouterr().out
+
+
+def test_worker_review_includes_documentation_findings(monkeypatch, capsys):
+    """M3 parity: async reviews now carry doc findings, like the sync path always has."""
+    fake = _FakeGitHub(
+        "x = 1",
+        files=["README.md"],
+        file_contents={"README.md": "notes only"},  # lacks install + usage guidance
+    )
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
+
+    async def _seed(queue: JobQueue) -> None:
+        await queue.enqueue({"owner": "octo", "repo": "hello", "pr_number": 11})
+
+    queue = JobQueue()
+    asyncio.run(_seed(queue))
+    worker = BackgroundWorker(queue)
+
+    _drive_one_job(worker, queue, fake)
+
+    assert len(fake.posted) == 1
+    body = fake.posted[0][3]
+    assert "## Documentation Issues" in body
+    assert "missing installation instructions" in body
+    assert "missing usage guidance" in body
+    assert "PR #11 Risk:" in capsys.readouterr().out

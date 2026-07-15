@@ -167,10 +167,10 @@ def test_worker_continues_after_processing_error(capsys):
         bw_module.asyncio.sleep = fast_sleep
 
         task = asyncio.create_task(worker.start())
-        for _ in range(2000):
-            if queue._queue.qsize() == 0:
+        for _ in range(500):
+            if worker.processed_count >= 2:
                 break
-            await real_sleep(0)
+            await real_sleep(0.01)
 
         task.cancel()
         try:

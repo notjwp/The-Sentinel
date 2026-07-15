@@ -24,9 +24,9 @@ def test_worker_starts_and_processes_single_job(capsys):
 
         task = asyncio.create_task(worker.start())
         for _ in range(500):
-            if queue._queue.qsize() == 0:
+            if worker.processed_count >= 1:
                 break
-            await real_sleep(0)
+            await real_sleep(0.01)
         task.cancel()
         try:
             await task
@@ -95,10 +95,12 @@ def test_queue_drains_before_cancellation():
         bw_module.asyncio.sleep = fast_sleep
 
         task = asyncio.create_task(worker.start())
-        for _ in range(2000):
-            if queue._queue.qsize() == 0:
+        # Processing runs off-loop (to_thread), so wait real wall-clock on the
+        # deterministic completion counter rather than busy-spinning on sleep(0).
+        for _ in range(500):
+            if worker.processed_count >= 10:
                 break
-            await real_sleep(0)
+            await real_sleep(0.01)
 
         task.cancel()
         try:
@@ -134,10 +136,10 @@ def test_multiple_workers_drain_shared_queue(capsys):
         task1 = asyncio.create_task(worker1.start())
         task2 = asyncio.create_task(worker2.start())
 
-        for _ in range(3000):
-            if queue._queue.qsize() == 0:
+        for _ in range(500):
+            if worker1.processed_count + worker2.processed_count >= 20:
                 break
-            await real_sleep(0)
+            await real_sleep(0.01)
 
         task1.cancel()
         task2.cancel()
@@ -216,10 +218,10 @@ def test_worker_blocks_on_empty_queue_and_resumes():
         await real_sleep(0.05)
 
         await queue.enqueue({"repo": "delayed", "pr_number": 42})
-        for _ in range(1000):
-            if queue._queue.qsize() == 0:
+        for _ in range(500):
+            if worker.processed_count >= 1:
                 break
-            await real_sleep(0)
+            await real_sleep(0.01)
 
         task.cancel()
         try:

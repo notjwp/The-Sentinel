@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 
+from sentinel.api.delivery_dedup import DeliveryDeduper
 from sentinel.api.webhook_security import verify_webhook_signature
 from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
@@ -20,6 +22,11 @@ from sentinel.monitoring.logger import get_logger
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+# Remembers recent X-GitHub-Delivery ids so re-sent deliveries (redeliveries,
+# double-sends) don't re-run the whole pipeline. Module state, like the router;
+# tests swap in a fresh instance via monkeypatch.
+_deduper = DeliveryDeduper()
 
 
 class WebhookPayload(BaseModel):
@@ -215,6 +222,114 @@ def _extract_file_contents(raw_payload: dict[str, Any]) -> dict[str, str]:
     return file_contents
 
 
+def _run_sync_review(
+    *,
+    code: str,
+    risk_engine: RiskEngine,
+    orchestrator: AuditOrchestrator,
+    document_service: DocumentService,
+    github_client: GitHubClient | None,
+    owner: str | None,
+    repo_name: str | None,
+    pr_number: int | None,
+    files: list[str],
+    file_contents: dict[str, str],
+) -> dict[str, Any]:
+    """Run the synchronous review pipeline (assess -> enrich/report -> post).
+
+    Pure blocking work (sklearn + openai + urllib). ``_webhook_impl`` runs it via
+    ``asyncio.to_thread`` so it never executes on the event loop, keeping the server
+    responsive to other requests while one sync review is in flight.
+    """
+    risk_result = risk_engine.assess(code=code)
+    findings = risk_result.get("security", {}).get("findings", [])
+    risk = risk_result.get("severity", SeverityLevel.LOW)
+    risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk)
+
+    if hasattr(orchestrator, "run_full_review"):
+        findings, formatted_report = orchestrator.run_full_review(
+            code=code,
+            findings=findings,
+            risk=risk,
+            files=files,
+            file_contents=file_contents,
+            complexity=risk_result.get("complexity"),
+            maintainability=risk_result.get("maintainability"),
+            semantic_findings_count=risk_result.get("semantic_findings_count"),
+        )
+    else:
+        findings = orchestrator.enrich_findings_with_llm(code, findings)
+        settings = get_settings()
+        if settings.ENABLE_DOC_REVIEW:
+            findings.extend(
+                document_service.analyze(
+                    files,
+                    file_contents=file_contents,
+                    enable_llm_review=False,
+                    llm_reviewer=None,
+                )
+            )
+        formatted_report = orchestrator.build_report(
+            findings,
+            risk,
+            complexity=risk_result.get("complexity"),
+            maintainability=risk_result.get("maintainability"),
+            semantic_findings_count=risk_result.get("semantic_findings_count"),
+        )
+        if settings.ENABLE_TRANSLATION:
+            formatted_report = orchestrator.append_translations(formatted_report)
+
+    settings = get_settings()
+    if (
+        settings.ENABLE_GITHUB
+        and github_client is not None
+        and owner
+        and repo_name
+        and pr_number is not None
+    ):
+        try:
+            posted = github_client.upsert_comment(owner, repo_name, pr_number, formatted_report)
+            logger.info(
+                "GitHub comment posted=%s owner=%s repo=%s pr=%s",
+                posted,
+                owner,
+                repo_name,
+                pr_number,
+            )
+        except Exception:
+            logger.exception("GitHub comment posting failed; continuing without crash")
+    else:
+        logger.info("GitHub comment skipped for this webhook request")
+
+    serialized_findings = [
+        {
+            "type": finding.type,
+            "category": finding.category,
+            "owasp_category": finding.owasp_category,
+            "severity": finding.severity.value if isinstance(finding.severity, SeverityLevel) else str(finding.severity),
+            "description": finding.description,
+            "file": finding.file or "unknown",
+            "line": finding.line if finding.line is not None else 1,
+            "recommendation": finding.recommendation,
+            "explanation": finding.explanation,
+            "fix_suggestion": finding.fix_suggestion,
+        }
+        for finding in findings
+    ]
+
+    logger.info(
+        "Synchronous processing completed findings=%s risk=%s",
+        len(serialized_findings),
+        risk_value,
+    )
+    return {
+        "status": "processed",
+        "risk": risk_value,
+        "findings": serialized_findings,
+        "report": formatted_report,
+    }
+
+
 async def _webhook_impl(
     request: Request,
     payload: WebhookPayload = Body(
@@ -300,93 +415,21 @@ async def _webhook_impl(
             if hasattr(orchestrator, "document_service"):
                 orchestrator.document_service = document_service
 
-            risk_result = risk_engine.assess(code=code)
-            findings = risk_result.get("security", {}).get("findings", [])
-            risk = risk_result.get("severity", SeverityLevel.LOW)
-            risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk)
-
-            if hasattr(orchestrator, "run_full_review"):
-                findings, formatted_report = orchestrator.run_full_review(
-                    code=code,
-                    findings=findings,
-                    risk=risk,
-                    files=files,
-                    file_contents=file_contents,
-                    complexity=risk_result.get("complexity"),
-                    maintainability=risk_result.get("maintainability"),
-                    semantic_findings_count=risk_result.get("semantic_findings_count"),
-                )
-            else:
-                findings = orchestrator.enrich_findings_with_llm(code, findings)
-                settings = get_settings()
-                if settings.ENABLE_DOC_REVIEW:
-                    findings.extend(
-                        document_service.analyze(
-                            files,
-                            file_contents=file_contents,
-                            enable_llm_review=False,
-                            llm_reviewer=None,
-                        )
-                    )
-                formatted_report = orchestrator.build_report(
-                    findings,
-                    risk,
-                    complexity=risk_result.get("complexity"),
-                    maintainability=risk_result.get("maintainability"),
-                    semantic_findings_count=risk_result.get("semantic_findings_count"),
-                )
-                if settings.ENABLE_TRANSLATION:
-                    formatted_report = orchestrator.append_translations(formatted_report)
-
-            settings = get_settings()
-            if (
-                settings.ENABLE_GITHUB
-                and github_client is not None
-                and owner
-                and repo_name
-                and pr_number is not None
-            ):
-                try:
-                    posted = github_client.upsert_comment(owner, repo_name, pr_number, formatted_report)
-                    logger.info(
-                        "GitHub comment posted=%s owner=%s repo=%s pr=%s",
-                        posted,
-                        owner,
-                        repo_name,
-                        pr_number,
-                    )
-                except Exception:
-                    logger.exception("GitHub comment posting failed; continuing without crash")
-            else:
-                logger.info("GitHub comment skipped for this webhook request")
-
-            serialized_findings = [
-                {
-                    "type": finding.type,
-                    "category": finding.category,
-                    "owasp_category": finding.owasp_category,
-                    "severity": finding.severity.value if isinstance(finding.severity, SeverityLevel) else str(finding.severity),
-                    "description": finding.description,
-                    "file": finding.file or "unknown",
-                    "line": finding.line if finding.line is not None else 1,
-                    "recommendation": finding.recommendation,
-                    "explanation": finding.explanation,
-                    "fix_suggestion": finding.fix_suggestion,
-                }
-                for finding in findings
-            ]
-
-            logger.info(
-                "Synchronous processing completed findings=%s risk=%s",
-                len(serialized_findings),
-                risk_value,
+            # Offload the blocking pipeline (sklearn + openai + urllib) off the event
+            # loop so a slow LLM/GitHub call doesn't freeze the whole server.
+            return await asyncio.to_thread(
+                _run_sync_review,
+                code=code,
+                risk_engine=risk_engine,
+                orchestrator=orchestrator,
+                document_service=document_service,
+                github_client=github_client,
+                owner=owner,
+                repo_name=repo_name,
+                pr_number=pr_number,
+                files=files,
+                file_contents=file_contents,
             )
-            return {
-                "status": "processed",
-                "risk": risk_value,
-                "findings": serialized_findings,
-                "report": formatted_report,
-            }
         except Exception as exc:
             logger.exception("Synchronous webhook processing failed")
             return {
@@ -434,6 +477,13 @@ async def webhook(
     ),
     orchestrator: AuditOrchestrator = Depends(get_orchestrator),
 ) -> dict[str, Any]:
+    # Runs after signature verification (the route dependency) and ahead of both
+    # modes: a re-sent delivery is answered 200 without any re-processing.
+    delivery_id = request.headers.get("X-GitHub-Delivery")
+    if _deduper.is_duplicate(delivery_id):
+        logger.info("Duplicate delivery %s skipped", delivery_id)
+        return {"status": "duplicate"}
+
     has_explicit_code = isinstance(payload.code, str) and payload.code.strip() != ""
     has_simple_queue_fields = (
         payload.repo is not None
