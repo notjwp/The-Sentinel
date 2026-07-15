@@ -1,3 +1,4 @@
+import base64
 import builtins
 import types
 
@@ -603,3 +604,186 @@ def test_get_pull_request_data_empty_when_no_files(monkeypatch):
         "files": [],
         "file_contents": {},
     }
+
+
+def test_get_pull_request_refs_extracts_shas(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    def fake_json(method, url, headers, data=None):
+        assert method == "GET"
+        assert url.endswith("/repos/octo/repo/pulls/7")
+        assert headers["Authorization"] == "token installation-token"
+        return {"head": {"sha": "h1"}, "base": {"sha": "b1"}}
+
+    monkeypatch.setattr(client, "_http_json", fake_json)
+    assert client.get_pull_request_refs("octo", "repo", 7) == {"head_sha": "h1", "base_sha": "b1"}
+
+    # Error response -> {}; missing owner -> {} without any request.
+    monkeypatch.setattr(client, "_http_json", lambda *a, **k: None)
+    assert client.get_pull_request_refs("octo", "repo", 7) == {}
+    assert client.get_pull_request_refs("", "repo", 7) == {}
+
+
+def test_get_content_by_url_decodes_base64_with_newlines(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    encoded = base64.b64encode(b"Install with pip install x\nUsage: run it\n").decode()
+    wrapped = "\n".join(encoded[i : i + 16] for i in range(0, len(encoded), 16))
+    monkeypatch.setattr(
+        client, "_http_json", lambda *a, **k: {"encoding": "base64", "content": wrapped}
+    )
+
+    text = client.get_content_by_url("https://api.test/repos/o/r/contents/README.md?ref=abc")
+    assert text is not None
+    assert "pip install x" in text
+    assert "Usage: run it" in text
+
+
+def test_get_content_by_url_edge_cases(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    # Genuinely empty file -> "" (NOT None, which signals failure).
+    monkeypatch.setattr(client, "_http_json", lambda *a, **k: {"encoding": "base64", "content": ""})
+    assert client.get_content_by_url("https://api.test/contents/EMPTY.md?ref=x") == ""
+
+    # Unsupported encoding -> None.
+    monkeypatch.setattr(
+        client, "_http_json", lambda *a, **k: {"encoding": "utf-8", "content": "raw"}
+    )
+    assert client.get_content_by_url("https://api.test/contents/x?ref=x") is None
+
+    # Error response -> None; non-http url -> None without a request.
+    monkeypatch.setattr(client, "_http_json", lambda *a, **k: None)
+    assert client.get_content_by_url("https://api.test/contents/x?ref=x") is None
+    assert client.get_content_by_url("not-a-url") is None
+
+
+def _corpus_tree_and_blobs(py_source: bytes) -> tuple[dict, dict]:
+    encoded = base64.b64encode(py_source).decode()
+    tree = {
+        "tree": [
+            {"type": "blob", "path": "app.py", "sha": "s1", "size": 30},
+            {"type": "blob", "path": "README.md", "sha": "s2", "size": 10},  # not .py
+            {"type": "tree", "path": "pkg", "sha": "s3"},  # not a blob
+            {"type": "blob", "path": ".hidden/tool.py", "sha": "s4", "size": 10},  # dot path
+            {"type": "blob", "path": "big.py", "sha": "s5", "size": 999_999},  # over size cap
+            {"type": "blob", "path": "util.py", "sha": "s6", "size": 25},
+        ]
+    }
+    blob = {"encoding": "base64", "content": encoded}
+    return tree, blob
+
+
+def test_get_repo_code_corpus_assembles_filters_and_caches(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+    tree, blob = _corpus_tree_and_blobs(b"def add(a, b):\n    return a + b\n")
+    calls = {"tree": 0, "blobs": []}
+
+    def fake_json(method, url, headers, data=None):
+        if "/git/trees/" in url:
+            calls["tree"] += 1
+            assert url.endswith("/repos/octo/repo/git/trees/base-sha?recursive=1")
+            return tree
+        if "/git/blobs/" in url:
+            calls["blobs"].append(url.rsplit("/", 1)[1])
+            return blob
+        pytest.fail(f"unexpected url {url}")
+
+    monkeypatch.setattr(client, "_http_json", fake_json)
+    corpus = client.get_repo_code_corpus("octo", "repo", "base-sha")
+
+    assert len(corpus) == 2  # only app.py and util.py qualify
+    assert all("def add" in text for text in corpus)
+    assert calls["blobs"] == ["s1", "s6"]
+
+    # Second call for the same ref is served from the cache: no new requests.
+    assert client.get_repo_code_corpus("octo", "repo", "base-sha") == corpus
+    assert calls["tree"] == 1
+    assert len(calls["blobs"]) == 2
+
+
+def test_get_repo_code_corpus_respects_file_cap(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+    encoded = base64.b64encode(b"def f(a, b, c):\n    return a\n").decode()
+    tree = {
+        "tree": [
+            {"type": "blob", "path": f"mod_{i}.py", "sha": f"sha{i}", "size": 20}
+            for i in range(GitHubClient.CORPUS_MAX_FILES + 15)
+        ]
+    }
+    blobs_fetched = []
+
+    def fake_json(method, url, headers, data=None):
+        if "/git/trees/" in url:
+            return tree
+        blobs_fetched.append(url)
+        return {"encoding": "base64", "content": encoded}
+
+    monkeypatch.setattr(client, "_http_json", fake_json)
+    corpus = client.get_repo_code_corpus("octo", "repo", "cap-ref")
+    assert len(corpus) == GitHubClient.CORPUS_MAX_FILES
+    assert len(blobs_fetched) == GitHubClient.CORPUS_MAX_FILES
+
+
+def test_get_repo_code_corpus_failures(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+
+    # Tree fetch error -> [].
+    monkeypatch.setattr(client, "_http_json", lambda *a, **k: None)
+    assert client.get_repo_code_corpus("octo", "repo", "dead-ref") == []
+
+    # One blob failing -> partial corpus, not [].
+    encoded = base64.b64encode(b"def keep(a, b):\n    return a - b\n").decode()
+
+    def fake_json(method, url, headers, data=None):
+        if "/git/trees/" in url:
+            return {
+                "tree": [
+                    {"type": "blob", "path": "bad.py", "sha": "bad", "size": 10},
+                    {"type": "blob", "path": "good.py", "sha": "good", "size": 10},
+                ]
+            }
+        if url.endswith("/bad"):
+            return None
+        return {"encoding": "base64", "content": encoded}
+
+    monkeypatch.setattr(client, "_http_json", fake_json)
+    corpus = client.get_repo_code_corpus("octo", "repo", "partial-ref")
+    assert len(corpus) == 1
+    assert "def keep" in corpus[0]
+
+
+def test_get_pull_request_data_fetches_full_doc_content(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    items = [
+        {"filename": "app.py", "patch": "+x = 1", "contents_url": "https://api.test/c/app"},
+        {"filename": "README.md", "patch": "+one line", "contents_url": "https://api.test/c/rm"},
+    ]
+    monkeypatch.setattr(client, "get_pull_request_files", lambda *a, **k: items)
+
+    def fake_content(url):
+        assert url.endswith("/c/rm"), "must only fetch content for doc files"
+        return "# Full README\npip install x\nUsage: run it"
+
+    monkeypatch.setattr(client, "get_content_by_url", fake_content)
+    data = client.get_pull_request_data("octo", "repo", 7)
+
+    assert data["file_contents"]["README.md"] == "# Full README\npip install x\nUsage: run it"
+    assert data["file_contents"]["app.py"] == "+x = 1"  # code files keep patch text
+    assert data["code"] == "x = 1\none line"  # added-line assembly unchanged
+
+
+def test_get_pull_request_data_doc_fetch_failure_falls_back_to_patch(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    items = [{"filename": "README.md", "patch": "+patched", "contents_url": "https://api.test/c"}]
+    monkeypatch.setattr(client, "get_pull_request_files", lambda *a, **k: items)
+    monkeypatch.setattr(client, "get_content_by_url", lambda url: None)
+
+    data = client.get_pull_request_data("octo", "repo", 7)
+    assert data["file_contents"]["README.md"] == "+patched"

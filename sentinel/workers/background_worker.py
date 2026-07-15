@@ -25,6 +25,8 @@ EXISTING_CODE_LIST: list[str] = [
 MAX_CODE_LENGTH = 2 * 1024 * 1024
 SMALL_PAYLOAD_THRESHOLD = 20_000
 TARGET_LATENCY_SECONDS = 0.1
+# Upper bound on semantic-corpus entries per job (each is embedded per assessment).
+CORPUS_MAX_UNITS = 200
 
 
 def _build_github_client(settings: Settings) -> GitHubClient | None:
@@ -116,11 +118,17 @@ class BackgroundWorker:
             )
             code = code[:MAX_CODE_LENGTH]
 
+        # Real corpus fetched from the PR's base ref when available (M5); the
+        # static two-function list remains the no-GitHub fallback.
+        existing_code_list = job.get("existing_code_list")
+        if not isinstance(existing_code_list, list) or not existing_code_list:
+            existing_code_list = EXISTING_CODE_LIST
+
         assessment_start = time.monotonic()
         try:
             assessment = risk_engine.assess_resilient(
                 code=code,
-                existing_code_list=EXISTING_CODE_LIST,
+                existing_code_list=existing_code_list,
                 warn_threshold_seconds=TARGET_LATENCY_SECONDS,
             )
         except Exception:
@@ -204,6 +212,33 @@ class BackgroundWorker:
             repo_name,
             pr_number,
         )
+
+        # Build the semantic corpus from the base branch (what the PR lands on),
+        # chunked into top-level units. Best-effort: on any failure the job keeps
+        # no corpus and _assess falls back to the static list.
+        try:
+            refs = github_client.get_pull_request_refs(owner, repo_name, pr_number)
+            base_sha = refs.get("base_sha")
+            if base_sha:
+                corpus_files = github_client.get_repo_code_corpus(owner, repo_name, base_sha)
+                chunks = [
+                    chunk
+                    for content in corpus_files
+                    for chunk in SemanticService.chunk_code_units(content)
+                ]
+                if chunks:
+                    job["existing_code_list"] = chunks[:CORPUS_MAX_UNITS]
+                    logger.info(
+                        "Built semantic corpus of %s units from %s files for repo=%s pr=%s",
+                        len(job["existing_code_list"]),
+                        len(corpus_files),
+                        repo_name,
+                        pr_number,
+                    )
+        except Exception:
+            logger.exception(
+                "Semantic corpus build failed for repo=%s pr=%s", repo_name, pr_number
+            )
 
     @staticmethod
     def _post_review(

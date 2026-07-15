@@ -18,11 +18,14 @@ class _FakeGitHub:
         code: str,
         files: list[str] | None = None,
         file_contents: dict[str, str] | None = None,
+        corpus: list[str] | None = None,
     ) -> None:
         self._code = code
         self._files = files or []
         self._file_contents = file_contents or {}
+        self._corpus = corpus or []
         self.fetched_with: tuple | None = None
+        self.corpus_ref: str | None = None
         self.posted: list[tuple] = []
 
     def get_pull_request_data(self, owner: str, repo: str, pr_number) -> dict:
@@ -32,6 +35,13 @@ class _FakeGitHub:
             "files": self._files,
             "file_contents": self._file_contents,
         }
+
+    def get_pull_request_refs(self, owner: str, repo: str, pr_number) -> dict:
+        return {"head_sha": "head-sha", "base_sha": "base-sha"}
+
+    def get_repo_code_corpus(self, owner: str, repo: str, ref: str) -> list[str]:
+        self.corpus_ref = ref
+        return self._corpus
 
     def post_comment(self, owner: str, repo: str, pr_number, body: str) -> bool:
         self.posted.append((owner, repo, pr_number, body))
@@ -203,3 +213,44 @@ def test_worker_review_includes_documentation_findings(monkeypatch, capsys):
     assert "missing installation instructions" in body
     assert "missing usage guidance" in body
     assert "PR #11 Risk:" in capsys.readouterr().out
+
+
+def test_worker_semantic_corpus_flags_duplicate_code(monkeypatch, capsys):
+    """M5: the worker builds a real corpus from the base ref and flags duplication.
+
+    The PR code is benign (no secrets), so the HIGH risk can only come from the
+    semantic engine matching it against a corpus chunk.
+    """
+    pr_code = (
+        "def compute_total(values):\n"
+        "    total = 0\n"
+        "    for value in values:\n"
+        "        total = total + value\n"
+        "    return total"
+    )
+    corpus_file = (
+        "import math\n"
+        "\n" + pr_code + "\n\n"
+        "def unrelated_parser(text, sep, limit, flags):\n"
+        "    return text.split(sep, limit)\n"
+    )
+    fake = _FakeGitHub(pr_code, corpus=[corpus_file])
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
+
+    async def _seed(queue: JobQueue) -> None:
+        await queue.enqueue({"owner": "octo", "repo": "hello", "pr_number": 12})
+
+    queue = JobQueue()
+    asyncio.run(_seed(queue))
+    worker = BackgroundWorker(queue)
+
+    _drive_one_job(worker, queue, fake)
+
+    assert fake.corpus_ref == "base-sha"  # corpus is built from the PR's BASE ref
+    assert len(fake.posted) == 1
+    body = fake.posted[0][3]
+    assert "Similar findings detected: 1" in body
+    assert "- No security issues detected." in body
+    assert "## Risk Score: HIGH" in body  # driven purely by the semantic duplicate
+    assert "PR #12 Risk: HIGH" in capsys.readouterr().out

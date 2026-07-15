@@ -12,13 +12,50 @@ class EmbeddingPort(Protocol):
 
 class SemanticService:
     SIMILARITY_THRESHOLD: float = 0.9
+    # Corpus chunks smaller than this embed noisily; drop them.
+    MIN_CHUNK_TOKENS: int = 5
 
     def __init__(self, embedding_engine: EmbeddingPort) -> None:
         self._embedding_engine = embedding_engine
 
-    def tokenize_code(self, code: str) -> list[str]:
+    @staticmethod
+    def tokenize_code(code: str) -> list[str]:
         raw_tokens = re.split(r"[^a-zA-Z0-9]+", code.lower())
         return [token for token in raw_tokens if token]
+
+    @staticmethod
+    def chunk_code_units(content: str, *, max_units: int = 50) -> list[str]:
+        """Split source text into top-level def/class units for corpus granularity.
+
+        detect_duplicates embeds the whole PR against each corpus entry, so a PR
+        that re-implements one existing function only crosses the similarity
+        threshold against an entry of roughly that function's size — per-unit
+        entries beat whole files. Decorators stay attached to their unit; the
+        preamble (imports/constants before the first unit) forms its own chunk;
+        fragments under MIN_CHUNK_TOKENS are dropped.
+        """
+        if not isinstance(content, str) or not content.strip():
+            return []
+
+        lines = content.splitlines()
+        starts: list[int] = []
+        for index, line in enumerate(lines):
+            if line.startswith(("def ", "class ")):
+                while index > 0 and lines[index - 1].startswith("@"):
+                    index -= 1
+                if not starts or index > starts[-1]:
+                    starts.append(index)
+
+        boundaries = starts if starts and starts[0] == 0 else [0, *starts]
+        chunks: list[str] = []
+        for position, begin in enumerate(boundaries):
+            end = boundaries[position + 1] if position + 1 < len(boundaries) else len(lines)
+            chunk = "\n".join(lines[begin:end]).strip()
+            if len(SemanticService.tokenize_code(chunk)) >= SemanticService.MIN_CHUNK_TOKENS:
+                chunks.append(chunk)
+            if len(chunks) >= max_units:
+                break
+        return chunks
 
     def generate_embedding(self, tokens: list[str]) -> list[float]:
         text = " ".join(tokens)

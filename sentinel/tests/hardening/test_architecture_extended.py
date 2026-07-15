@@ -201,6 +201,7 @@ def test_infrastructure_imports_only_allowed():
         "math",
         "hashlib",
         "json",
+        "base64",
         "os",
         "pathlib",
         "asyncio",
