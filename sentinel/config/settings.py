@@ -53,6 +53,7 @@ class Settings:
     GITHUB_PRIVATE_KEY: str | None
     GITHUB_API_BASE_URL: str
     GITHUB_WEBHOOK_SECRET: str | None
+    REDIS_URL: str | None
 
 
 def get_settings() -> Settings:
@@ -103,6 +104,12 @@ def get_settings() -> Settings:
     if github_webhook_secret == "":
         github_webhook_secret = None
 
+    # Durable queue/dedup backend. Unset -> in-memory (single-process, non-durable).
+    raw_redis_url = os.getenv("REDIS_URL")
+    redis_url = raw_redis_url.strip() if raw_redis_url is not None else None
+    if redis_url == "":
+        redis_url = None
+
     return Settings(
         NVIDIA_API_KEY=nvidia_key,
         ENABLE_LLM=_to_bool(os.getenv("ENABLE_LLM"), True),
@@ -119,4 +126,5 @@ def get_settings() -> Settings:
         GITHUB_PRIVATE_KEY=github_private_key,
         GITHUB_API_BASE_URL=github_api_base_url,
         GITHUB_WEBHOOK_SECRET=github_webhook_secret,
+        REDIS_URL=redis_url,
     )

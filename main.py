@@ -15,13 +15,16 @@ from sentinel.api.webhook_controller import router as webhook_router
 from sentinel.api.webhook_controller import get_orchestrator
 from sentinel.api.health_controller import router as health_router
 from sentinel.config.settings import get_settings
+from sentinel.infrastructure.redis.redis_job_queue import RedisJobQueue
 from sentinel.monitoring.logger import get_logger
 from sentinel.workers.background_worker import BackgroundWorker
 from sentinel.workers.job_queue import JobQueue
 
 logger = get_logger(__name__)
 
-job_queue = JobQueue()
+# Composition root: REDIS_URL set -> durable Redis queue; unset -> in-memory.
+_settings = get_settings()
+job_queue = RedisJobQueue(_settings.REDIS_URL) if _settings.REDIS_URL else JobQueue()
 audit_orchestrator = AuditOrchestrator(job_queue)
 background_worker = BackgroundWorker(job_queue)
 
@@ -31,6 +34,10 @@ async def lifespan(app: FastAPI):
     logger.info("Starting background worker")
     app.state.worker_task = asyncio.create_task(background_worker.start())
     settings = get_settings()
+    logger.info(
+        "Queue/dedup backend: %s",
+        "redis (durable)" if settings.REDIS_URL else "in-memory (non-durable)",
+    )
     if settings.ENABLE_GITHUB and not settings.GITHUB_WEBHOOK_SECRET:
         logger.warning(
             "ENABLE_GITHUB is on but GITHUB_WEBHOOK_SECRET is unset — "

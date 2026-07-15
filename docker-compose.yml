@@ -7,4 +7,20 @@ services:
     # Requires a local .env (git-ignored). Remove this block to run with defaults.
     env_file:
       - .env
+    environment:
+      # Durable queue/dedup (overrides .env). Remove to fall back to in-memory.
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
     restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # AOF so queued jobs survive a Redis restart too, not just an app restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:

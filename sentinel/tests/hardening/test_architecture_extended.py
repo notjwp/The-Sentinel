@@ -133,6 +133,8 @@ def test_no_circular_imports_in_sentinel_modules():
         "sentinel.application.risk_engine",
         "sentinel.application.audit_orchestrator",
         "sentinel.infrastructure.semantic.embedding_engine",
+        "sentinel.infrastructure.redis.redis_job_queue",
+        "sentinel.infrastructure.redis.redis_delivery_dedup",
         "sentinel.api.webhook_controller",
         "sentinel.api.health_controller",
         "sentinel.workers.job_queue",
@@ -185,8 +187,10 @@ def test_infrastructure_imports_only_allowed():
     allowed_prefixes = [
         "sklearn",
         "numpy",
+        "redis",
         "sentinel.domain",
         "sentinel.infrastructure",
+        "sentinel.monitoring",
         "__future__",
         "typing",
         "re",
@@ -199,6 +203,9 @@ def test_infrastructure_imports_only_allowed():
         "json",
         "os",
         "pathlib",
+        "asyncio",
+        "uuid",
+        "time",
     ]
 
     for path in _python_files(INFRASTRUCTURE_DIR):

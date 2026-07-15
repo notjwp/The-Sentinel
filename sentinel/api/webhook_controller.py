@@ -18,15 +18,29 @@ from sentinel.domain.services.security_service import SecurityService
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.infrastructure.github.github_client import GitHubClient
 from sentinel.infrastructure.llm.llm_service import LLMService
+from sentinel.infrastructure.redis.redis_delivery_dedup import RedisDeliveryDeduper
 from sentinel.monitoring.logger import get_logger
 
 router = APIRouter()
 logger = get_logger(__name__)
 
+
+def _build_deduper() -> DeliveryDeduper | RedisDeliveryDeduper:
+    """Pick the dedup backend: Redis when REDIS_URL is set, else in-memory.
+
+    Module-scope seam (mirrors the worker's _build_github_client) so tests can
+    monkeypatch webhook_controller._deduper with a fresh instance.
+    """
+    settings = get_settings()
+    if settings.REDIS_URL:
+        return RedisDeliveryDeduper(settings.REDIS_URL)
+    return DeliveryDeduper()
+
+
 # Remembers recent X-GitHub-Delivery ids so re-sent deliveries (redeliveries,
 # double-sends) don't re-run the whole pipeline. Module state, like the router;
 # tests swap in a fresh instance via monkeypatch.
-_deduper = DeliveryDeduper()
+_deduper = _build_deduper()
 
 
 class WebhookPayload(BaseModel):
@@ -480,7 +494,7 @@ async def webhook(
     # Runs after signature verification (the route dependency) and ahead of both
     # modes: a re-sent delivery is answered 200 without any re-processing.
     delivery_id = request.headers.get("X-GitHub-Delivery")
-    if _deduper.is_duplicate(delivery_id):
+    if await _deduper.is_duplicate(delivery_id):
         logger.info("Duplicate delivery %s skipped", delivery_id)
         return {"status": "duplicate"}
 

@@ -17,3 +17,14 @@ class JobQueue:
 
     async def dequeue(self) -> dict:
         return await self._queue.get()
+
+    async def ack(self, job: dict) -> None:
+        """No-op: in-memory jobs are gone once dequeued (at-most-once by nature).
+
+        Exists so callers use one interface for this queue and the durable
+        RedisJobQueue (which really does ack) without hasattr branching.
+        """
+
+    async def recover_pending(self) -> int:
+        """No-op counterpart to RedisJobQueue.recover_pending. Nothing to recover."""
+        return 0

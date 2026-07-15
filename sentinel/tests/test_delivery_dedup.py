@@ -5,6 +5,8 @@ route tests prove the webhook short-circuits duplicates in both queued and sync
 modes while requests without the header stay completely unaffected.
 """
 
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -22,39 +24,44 @@ class _FakeClock:
         return self.now
 
 
+def _is_dup(deduper: DeliveryDeduper, delivery_id) -> bool:
+    # is_duplicate is async (interface parity with the Redis deduper).
+    return asyncio.run(deduper.is_duplicate(delivery_id))
+
+
 def test_first_seen_is_not_duplicate_then_repeat_is():
     deduper = DeliveryDeduper()
-    assert deduper.is_duplicate("guid-1") is False
-    assert deduper.is_duplicate("guid-1") is True
+    assert _is_dup(deduper, "guid-1") is False
+    assert _is_dup(deduper, "guid-1") is True
 
 
 def test_missing_or_unusable_ids_are_never_deduped():
     deduper = DeliveryDeduper()
     for _ in range(2):  # repeats must stay False too
-        assert deduper.is_duplicate(None) is False
-        assert deduper.is_duplicate("") is False
-        assert deduper.is_duplicate("   ") is False
-        assert deduper.is_duplicate(123) is False  # type: ignore[arg-type]
+        assert _is_dup(deduper, None) is False
+        assert _is_dup(deduper, "") is False
+        assert _is_dup(deduper, "   ") is False
+        assert _is_dup(deduper, 123) is False
 
 
 def test_ttl_expiry_reallows_a_delivery():
     clock = _FakeClock()
     deduper = DeliveryDeduper(ttl_seconds=600.0, clock=clock)
 
-    assert deduper.is_duplicate("guid-1") is False
+    assert _is_dup(deduper, "guid-1") is False
     clock.now += 599.0
-    assert deduper.is_duplicate("guid-1") is True  # still within TTL
+    assert _is_dup(deduper, "guid-1") is True  # still within TTL
     clock.now += 2.0
-    assert deduper.is_duplicate("guid-1") is False  # expired -> fresh again
+    assert _is_dup(deduper, "guid-1") is False  # expired -> fresh again
 
 
 def test_capacity_eviction_forgets_the_oldest_id():
     deduper = DeliveryDeduper(max_entries=2)
-    assert deduper.is_duplicate("a") is False
-    assert deduper.is_duplicate("b") is False
-    assert deduper.is_duplicate("c") is False  # evicts "a" (oldest)
-    assert deduper.is_duplicate("a") is False  # forgotten, treated as new
-    assert deduper.is_duplicate("c") is True  # newest still remembered
+    assert _is_dup(deduper, "a") is False
+    assert _is_dup(deduper, "b") is False
+    assert _is_dup(deduper, "c") is False  # evicts "a" (oldest)
+    assert _is_dup(deduper, "a") is False  # forgotten, treated as new
+    assert _is_dup(deduper, "c") is True  # newest still remembered
 
 
 class _DummyOrchestrator:

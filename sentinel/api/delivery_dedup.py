@@ -29,11 +29,14 @@ class DeliveryDeduper:
         # first key is always the oldest entry when capacity eviction kicks in.
         self._seen: dict[str, float] = {}
 
-    def is_duplicate(self, delivery_id: str | None) -> bool:
+    async def is_duplicate(self, delivery_id: str | None) -> bool:
         """True when this id was already seen within the TTL; records it otherwise.
 
         Requests without a usable id (None/empty/non-str) are never deduped, so
         manual curl calls and the test suite pass through untouched.
+
+        Async purely for interface parity with RedisDeliveryDeduper (which must
+        await Redis); the body itself never awaits.
         """
         if not isinstance(delivery_id, str) or not delivery_id.strip():
             return False

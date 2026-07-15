@@ -4,10 +4,19 @@ from typing import Protocol
 from sentinel.config.settings import get_settings
 from sentinel.domain.entities.finding import Finding
 from sentinel.domain.value_objects.severity_level import SeverityLevel
-from sentinel.workers.job_queue import JobQueue
 from sentinel.monitoring.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class JobQueuePort(Protocol):
+    """What the orchestrator needs from a queue: enqueue only.
+
+    Satisfied by both the in-memory JobQueue and the durable RedisJobQueue;
+    which one is wired in is the composition root's choice (REDIS_URL).
+    """
+
+    async def enqueue(self, job: dict) -> None: ...
 
 
 class LLMServicePort(Protocol):
@@ -37,7 +46,7 @@ class DocumentServicePort(Protocol):
 class AuditOrchestrator:
     def __init__(
         self,
-        queue: JobQueue,
+        queue: JobQueuePort,
         llm_service: LLMServicePort | None = None,
         document_service: DocumentServicePort | None = None,
     ) -> None:

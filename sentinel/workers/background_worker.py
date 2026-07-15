@@ -281,6 +281,13 @@ class BackgroundWorker:
             document_service=DocumentService(),
         )
 
+        # Re-queue any jobs a previous (crashed) worker left mid-processing.
+        # No-op on the in-memory queue.
+        try:
+            await self.queue.recover_pending()
+        except Exception:
+            logger.exception("Job recovery failed; starting with the queue as-is")
+
         while True:
             try:
                 job = await self.queue.dequeue()
@@ -289,6 +296,9 @@ class BackgroundWorker:
                 await asyncio.to_thread(
                     self._process_one, job, risk_engine, orchestrator, github_client
                 )
+                # Only a fully processed job is acked; a crash before this line
+                # leaves it in the processing list for recovery on next start.
+                await self.queue.ack(job)
                 self.processed_count += 1
             except Exception:
                 logger.exception("Worker failed to process job; continuing")
