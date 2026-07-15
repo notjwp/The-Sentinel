@@ -271,7 +271,12 @@ class AuditOrchestrator:
                 )
                 path: str | None = None
                 line: int | None = None
-                if finding.type == "documentation" and finding.file and finding.line:
+                if (
+                    finding.type == "documentation"
+                    and finding.file
+                    and finding.file != "inline"  # analyze_code's label, not a real file
+                    and finding.line
+                ):
                     path, line = finding.file, finding.line
                 elif (
                     finding.type == "security"

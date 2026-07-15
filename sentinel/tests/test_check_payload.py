@@ -66,6 +66,21 @@ def test_doc_annotation_uses_its_own_location_and_level():
     assert annotation["annotation_level"] == "warning"  # MEDIUM
 
 
+def test_inline_code_doc_findings_are_not_annotated():
+    """analyze_code labels findings file='inline' — a sentinel, not a repo path."""
+    inline_doc = Finding(
+        rule="missing_module_docstring",
+        match="inline",
+        severity=SeverityLevel.LOW,
+        finding_type="documentation",
+        description="Code is missing a module-level docstring.",
+        file="inline",
+        line=1,
+    )
+    payload = _orchestrator().build_check_payload([inline_doc], SeverityLevel.LOW)
+    assert payload["annotations"] == []
+
+
 def test_unmappable_findings_are_skipped_not_fatal():
     semantic = Finding(
         rule="semantic_duplicate",
