@@ -46,6 +46,7 @@ class Settings:
     LLM_MODEL: str
     LLM_API_KEY: str | None
     ENABLE_GITHUB: bool
+    ENABLE_CHECKS: bool
     ENABLE_TRANSLATION: bool
     ENABLE_DOC_REVIEW: bool
     GITHUB_APP_ID: str | None
@@ -119,6 +120,7 @@ def get_settings() -> Settings:
         LLM_MODEL=llm_model,
         LLM_API_KEY=llm_api_key,
         ENABLE_GITHUB=_to_bool(os.getenv("ENABLE_GITHUB"), True),
+        ENABLE_CHECKS=_to_bool(os.getenv("ENABLE_CHECKS"), True),
         ENABLE_TRANSLATION=_to_bool(os.getenv("ENABLE_TRANSLATION"), False),
         ENABLE_DOC_REVIEW=_to_bool(os.getenv("ENABLE_DOC_REVIEW"), True),
         GITHUB_APP_ID=github_app_id,

@@ -204,6 +204,9 @@ class BackgroundWorker:
         file_contents = fetched.get("file_contents")
         if isinstance(file_contents, dict) and file_contents:
             job["file_contents"] = file_contents
+        line_map = fetched.get("line_map")
+        if isinstance(line_map, list) and line_map:
+            job["line_map"] = line_map
 
         logger.info(
             "Fetched %s chars of PR code across %s files for repo=%s pr=%s",
@@ -218,6 +221,9 @@ class BackgroundWorker:
         # no corpus and _assess falls back to the static list.
         try:
             refs = github_client.get_pull_request_refs(owner, repo_name, pr_number)
+            head_sha = refs.get("head_sha")
+            if head_sha:
+                job["head_sha"] = head_sha  # check runs attach to the head commit
             base_sha = refs.get("base_sha")
             if base_sha:
                 corpus_files = github_client.get_repo_code_corpus(owner, repo_name, base_sha)
@@ -256,9 +262,7 @@ class BackgroundWorker:
         try:
             security = assessment.get("security", {})
             findings = security.get("findings", []) if isinstance(security, dict) else []
-            # Same entry point as the sync webhook path: LLM enrichment + document
-            # findings + (flag-gated) translations, so async reviews have full parity.
-            _, report = orchestrator.run_full_review(
+            all_findings, report = orchestrator.run_full_review(
                 code=job.get("code", ""),
                 findings=findings,
                 risk=assessment["severity"],
@@ -272,6 +276,34 @@ class BackgroundWorker:
             logger.info(
                 "Worker posted review comment=%s repo=%s pr=%s", posted, repo_name, pr_number
             )
+
+            # Native check run alongside the comment: pass/fail in the merge box
+            # plus per-line annotations. Needs the app's Checks:write permission;
+            # without it create_check_run returns False (skipped, non-fatal).
+            head_sha = job.get("head_sha")
+            if get_settings().ENABLE_CHECKS and head_sha:
+                payload = orchestrator.build_check_payload(
+                    all_findings,
+                    assessment["severity"],
+                    line_map=job.get("line_map"),
+                    semantic_findings_count=assessment.get("semantic_findings_count"),
+                )
+                check_posted = github_client.create_check_run(
+                    owner,
+                    repo_name,
+                    head_sha,
+                    conclusion=payload["conclusion"],
+                    title=payload["title"],
+                    summary=payload["summary"],
+                    text=report,
+                    annotations=payload["annotations"],
+                )
+                logger.info(
+                    "Worker posted check run=%s repo=%s pr=%s",
+                    check_posted,
+                    repo_name,
+                    pr_number,
+                )
         except Exception:
             logger.exception("Failed to post PR review for repo=%s pr=%s", repo_name, pr_number)
 

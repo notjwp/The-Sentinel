@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +26,15 @@ class GitHubClient:
     CORPUS_MAX_FILES = 20  # most .py blobs fetched per corpus build
     CORPUS_MAX_FILE_BYTES = 50_000  # skip larger blobs (tree items carry size)
     MAX_CONTENT_BYTES = 200_000  # hard cap on any decoded file content
+
+    # Check-run limits (the Checks API accepts at most 50 annotations per request;
+    # output.text is capped server-side at 65535 chars — stay under it).
+    CHECK_RUN_NAME = "Sentinel AI Code Review"
+    MAX_CHECK_ANNOTATIONS = 50
+    MAX_CHECK_TEXT = 60_000
+
+    # Unified-diff hunk header: '@@ -old_start,old_count +new_start,new_count @@'.
+    _HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
     def __post_init__(self) -> None:
         self._installation_token: str | None = None
@@ -317,19 +327,40 @@ class GitHubClient:
         return self.post_comment(owner, repo, pr_number, marked_body)
 
     @staticmethod
-    def _added_lines_from_patch(patch: str | None) -> str:
-        """Reconstruct the code a PR introduces from a unified-diff patch hunk.
+    def _added_lines_with_positions(patch: str | None) -> list[tuple[int, str]]:
+        """Extract a patch's added lines paired with their line numbers at head.
 
-        Keeps added ('+') lines, dropping the '+++ ' file header and all
-        context/removed/'@@' lines. Returns "" for anything non-string/empty.
+        Hunk headers ('@@ -a,b +c,d @@') reset the new-file line counter; context
+        lines advance it; '+' lines advance it AND are collected; removed ('-')
+        and '\\ No newline...' lines don't touch it. Header-less shorthand (as in
+        test fixtures) counts from line 1. [] for non-string/empty input.
         """
         if not isinstance(patch, str) or not patch:
-            return ""
-        added: list[str] = []
+            return []
+        added: list[tuple[int, str]] = []
+        new_line = 1
         for line in patch.splitlines():
-            if line.startswith("+") and not line.startswith("+++"):
-                added.append(line[1:])
-        return "\n".join(added)
+            header = GitHubClient._HUNK_HEADER_RE.match(line)
+            if header:
+                new_line = int(header.group(1))
+                continue
+            if line.startswith("+++") or line.startswith("---"):
+                continue
+            if line.startswith("+"):
+                added.append((new_line, line[1:]))
+                new_line += 1
+            elif line.startswith("-") or line.startswith("\\"):
+                continue
+            else:
+                new_line += 1
+        return added
+
+    @staticmethod
+    def _added_lines_from_patch(patch: str | None) -> str:
+        """Reconstruct the code a PR introduces from a unified-diff patch hunk."""
+        return "\n".join(
+            text for _, text in GitHubClient._added_lines_with_positions(patch)
+        )
 
     def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
         """GET the changed files of a PR (all pages, capped). Returns [] on any failure."""
@@ -491,11 +522,16 @@ class GitHubClient:
         the whole document rather than a patch fragment; on fetch failure — and for all
         other files — the patch text remains the content source (the M3 behavior, which
         also mirrors the sync path's patch fallback). Empty values on failure.
+
+        ``line_map`` has one ``(filename, head_line)`` entry per line of ``code``
+        (built in the same loop, exact parallel), so a finding's line number in
+        the assembled code resolves to a real file location for check annotations.
         """
         items = self.get_pull_request_files(owner, repo, pr_number)
         segments: list[str] = []
         files: list[str] = []
         file_contents: dict[str, str] = {}
+        line_map: list[tuple[str, int]] = []
         for item in items:
             name = item.get("filename")
             patch = item.get("patch")
@@ -510,11 +546,69 @@ class GitHubClient:
                     file_contents[name] = full_content
                 elif isinstance(patch, str) and patch:
                     file_contents[name] = patch
-            added = self._added_lines_from_patch(patch)
-            if added:
-                segments.append(added)
-        return {"code": "\n".join(segments), "files": files, "file_contents": file_contents}
+            positioned = self._added_lines_with_positions(patch)
+            if positioned:
+                segments.append("\n".join(text for _, text in positioned))
+                map_name = name if isinstance(name, str) and name else "unknown"
+                line_map.extend((map_name, line_no) for line_no, _ in positioned)
+        return {
+            "code": "\n".join(segments),
+            "files": files,
+            "file_contents": file_contents,
+            "line_map": line_map,
+        }
 
     def get_pull_request_code(self, owner: str, repo: str, pr_number: int) -> str:
         """Assemble the added-line code introduced by a PR. Returns "" on failure."""
         return self.get_pull_request_data(owner, repo, pr_number)["code"]
+
+    def create_check_run(
+        self,
+        owner: str,
+        repo: str,
+        head_sha: str,
+        *,
+        conclusion: str,
+        title: str,
+        summary: str,
+        text: str | None = None,
+        annotations: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """POST a completed check run for a commit. Returns False on any failure.
+
+        Renders in the PR's Checks tab / merge box; annotations point at file
+        lines at the head ref. Requires the app's "Checks: write" permission —
+        without it the POST fails and this returns False (callers treat that as
+        a skipped, non-fatal step).
+        """
+        if not owner or not repo or not head_sha or not conclusion:
+            return False
+
+        token = self._get_installation_token()
+        if not token:
+            return False
+
+        output: dict[str, Any] = {
+            "title": title or self.CHECK_RUN_NAME,
+            "summary": summary or "",
+        }
+        if isinstance(text, str) and text:
+            output["text"] = text[: self.MAX_CHECK_TEXT]
+        if annotations:
+            output["annotations"] = list(annotations)[: self.MAX_CHECK_ANNOTATIONS]
+
+        endpoint = f"{self.api_base_url.rstrip('/')}/repos/{owner}/{repo}/check-runs"
+        response = self._http_json(
+            "POST",
+            endpoint,
+            headers={**self._token_headers(token), "Content-Type": "application/json"},
+            data={
+                "name": self.CHECK_RUN_NAME,
+                "head_sha": head_sha,
+                "status": "completed",
+                "conclusion": conclusion,
+                "output": output,
+            },
+        )
+
+        return isinstance(response, dict) and isinstance(response.get("id"), int)

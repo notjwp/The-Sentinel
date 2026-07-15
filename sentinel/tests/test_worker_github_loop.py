@@ -19,14 +19,17 @@ class _FakeGitHub:
         files: list[str] | None = None,
         file_contents: dict[str, str] | None = None,
         corpus: list[str] | None = None,
+        line_map: list | None = None,
     ) -> None:
         self._code = code
         self._files = files or []
         self._file_contents = file_contents or {}
         self._corpus = corpus or []
+        self._line_map = line_map or []
         self.fetched_with: tuple | None = None
         self.corpus_ref: str | None = None
         self.posted: list[tuple] = []
+        self.check_runs: list[dict] = []
 
     def get_pull_request_data(self, owner: str, repo: str, pr_number) -> dict:
         self.fetched_with = (owner, repo, pr_number)
@@ -34,7 +37,26 @@ class _FakeGitHub:
             "code": self._code,
             "files": self._files,
             "file_contents": self._file_contents,
+            "line_map": self._line_map,
         }
+
+    def create_check_run(
+        self, owner: str, repo: str, head_sha: str, *, conclusion, title, summary,
+        text=None, annotations=None,
+    ) -> bool:
+        self.check_runs.append(
+            {
+                "owner": owner,
+                "repo": repo,
+                "head_sha": head_sha,
+                "conclusion": conclusion,
+                "title": title,
+                "summary": summary,
+                "text": text,
+                "annotations": annotations or [],
+            }
+        )
+        return True
 
     def get_pull_request_refs(self, owner: str, repo: str, pr_number) -> dict:
         return {"head_sha": "head-sha", "base_sha": "base-sha"}
@@ -254,3 +276,61 @@ def test_worker_semantic_corpus_flags_duplicate_code(monkeypatch, capsys):
     assert "- No security issues detected." in body
     assert "## Risk Score: HIGH" in body  # driven purely by the semantic duplicate
     assert "PR #12 Risk: HIGH" in capsys.readouterr().out
+
+
+def test_worker_posts_check_run_with_line_mapped_annotations(monkeypatch, capsys):
+    """M6: alongside the comment, a check run lands with head-line annotations.
+
+    The line map says the two added lines live at app.py lines 14-15 (a mid-file
+    patch), so annotations must point THERE, not at code-blob lines 1-2.
+    """
+    code = 'password = "hunter2"\napi_key = "sk-abcdefghijklmnopqrst"'
+    fake = _FakeGitHub(code, line_map=[("app.py", 14), ("app.py", 15)])
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
+
+    async def _seed(queue: JobQueue) -> None:
+        await queue.enqueue({"owner": "octo", "repo": "hello", "pr_number": 13})
+
+    queue = JobQueue()
+    asyncio.run(_seed(queue))
+    worker = BackgroundWorker(queue)
+
+    _drive_one_job(worker, queue, fake)
+
+    assert len(fake.posted) == 1  # the comment still lands
+    assert len(fake.check_runs) == 1
+    run = fake.check_runs[0]
+    assert (run["owner"], run["repo"], run["head_sha"]) == ("octo", "hello", "head-sha")
+    assert run["conclusion"] == "failure"  # HIGH risk -> failure
+    assert "Risk: HIGH" in run["title"]
+    assert "# Sentinel AI Code Review" in run["text"]  # full report attached
+
+    security_annotations = [
+        a for a in run["annotations"] if a["annotation_level"] == "failure"
+    ]
+    lines_hit = {(a["path"], a["start_line"]) for a in security_annotations}
+    assert lines_hit == {("app.py", 14), ("app.py", 15)}
+    assert all(a["start_line"] == a["end_line"] for a in security_annotations)
+    assert "PR #13 Risk: HIGH" in capsys.readouterr().out
+
+
+def test_worker_skips_check_run_when_flag_off(monkeypatch, capsys):
+    """ENABLE_CHECKS=false: the comment posts, no check run is created."""
+    monkeypatch.setenv("ENABLE_CHECKS", "false")
+    fake = _FakeGitHub('password = "leak"')
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
+
+    async def _seed(queue: JobQueue) -> None:
+        await queue.enqueue({"owner": "octo", "repo": "hello", "pr_number": 14})
+
+    queue = JobQueue()
+    asyncio.run(_seed(queue))
+    worker = BackgroundWorker(queue)
+
+    _drive_one_job(worker, queue, fake)
+
+    assert len(fake.posted) == 1
+    assert fake.check_runs == []
+    assert "PR #14 Risk:" in capsys.readouterr().out

@@ -217,6 +217,100 @@ class AuditOrchestrator:
             logger.exception("Report formatting failed; returning safe fallback")
             return f"Sentinel AI Code Review\n\nRisk Score: {risk_value}"
 
+    # Checks API mappings: only CRITICAL/HIGH block a protected merge; MEDIUM is
+    # informational (neutral). Annotation levels follow the same shape.
+    _CHECK_CONCLUSIONS = {"CRITICAL": "failure", "HIGH": "failure", "MEDIUM": "neutral"}
+    _ANNOTATION_LEVELS = {"CRITICAL": "failure", "HIGH": "failure", "MEDIUM": "warning"}
+    MAX_CHECK_ANNOTATIONS = 50
+
+    @staticmethod
+    def _severity_value(severity: SeverityLevel | str | None) -> str:
+        if isinstance(severity, SeverityLevel):
+            return severity.value
+        return str(severity).upper() if severity else "LOW"
+
+    def build_check_payload(
+        self,
+        findings: list[Finding],
+        risk: SeverityLevel | str,
+        *,
+        line_map: list | None = None,
+        semantic_findings_count: int | None = None,
+    ) -> dict:
+        """Shape a review into a Checks API payload: conclusion, title, summary, annotations.
+
+        Security findings carry line numbers relative to the assembled added-lines
+        code; ``line_map`` (one ``(path, head_line)`` pair per code line, lists after
+        a Redis round-trip) resolves them to real file locations. Documentation
+        findings carry their own file/line. Semantic findings have no location and
+        stay summary-only. Failure-safe: annotation building never raises.
+        """
+        risk_value = self._severity_value(risk)
+        conclusion = self._CHECK_CONCLUSIONS.get(risk_value, "success")
+
+        security = [f for f in findings if getattr(f, "type", None) == "security"]
+        documentation = [f for f in findings if getattr(f, "type", None) == "documentation"]
+        title = (
+            f"Risk: {risk_value} — {len(security)} security, "
+            f"{len(documentation)} documentation issue(s)"
+        )
+        summary_lines = [
+            f"**Risk score:** {risk_value}",
+            f"- Security findings: {len(security)}",
+            f"- Documentation findings: {len(documentation)}",
+        ]
+        if semantic_findings_count is not None:
+            summary_lines.append(f"- Semantic duplicates: {semantic_findings_count}")
+        summary = "\n".join(summary_lines)
+
+        annotations: list[dict] = []
+        try:
+            for finding in findings:
+                level = self._ANNOTATION_LEVELS.get(
+                    self._severity_value(finding.severity), "notice"
+                )
+                path: str | None = None
+                line: int | None = None
+                if finding.type == "documentation" and finding.file and finding.line:
+                    path, line = finding.file, finding.line
+                elif (
+                    finding.type == "security"
+                    and isinstance(finding.line, int)
+                    and line_map
+                    and 1 <= finding.line <= len(line_map)
+                ):
+                    path, line = line_map[finding.line - 1]
+                if not isinstance(path, str) or not path or not isinstance(line, int):
+                    continue
+                message = finding.description or finding.rule
+                if finding.recommendation:
+                    message = f"{message}\n\n{finding.recommendation}"
+                annotations.append(
+                    {
+                        "path": path,
+                        "start_line": line,
+                        "end_line": line,
+                        "annotation_level": level,
+                        "message": message,
+                        "title": finding.rule,
+                    }
+                )
+        except Exception:
+            logger.exception("Check annotation building failed; posting without annotations")
+            annotations = []
+
+        overflow = len(annotations) - self.MAX_CHECK_ANNOTATIONS
+        if overflow > 0:
+            annotations = annotations[: self.MAX_CHECK_ANNOTATIONS]
+            summary += f"\n\n(+{overflow} more annotation(s) truncated — API limit is 50.)"
+
+        return {
+            "conclusion": conclusion,
+            "title": title,
+            "summary": summary,
+            "annotations": annotations,
+        }
+
     def append_translations(self, report: str, languages: list[str] | None = None) -> str:
         settings = get_settings()
         if not settings.ENABLE_TRANSLATION or self.llm_service is None:

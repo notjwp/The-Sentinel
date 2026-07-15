@@ -603,6 +603,7 @@ def test_get_pull_request_data_empty_when_no_files(monkeypatch):
         "code": "",
         "files": [],
         "file_contents": {},
+        "line_map": [],
     }
 
 
@@ -787,3 +788,108 @@ def test_get_pull_request_data_doc_fetch_failure_falls_back_to_patch(monkeypatch
 
     data = client.get_pull_request_data("octo", "repo", 7)
     assert data["file_contents"]["README.md"] == "+patched"
+
+
+def test_added_lines_with_positions_tracks_hunk_headers():
+    patch = (
+        "@@ -10,3 +10,5 @@ def existing():\n"
+        " context line\n"
+        "+first added\n"
+        " another context\n"
+        "-removed line\n"
+        "+second added\n"
+        "\\ No newline at end of file\n"
+        "@@ -40,2 +42,3 @@\n"
+        " ctx\n"
+        "+third added\n"
+    )
+    assert GitHubClient._added_lines_with_positions(patch) == [
+        (11, "first added"),
+        (13, "second added"),
+        (43, "third added"),
+    ]
+
+
+def test_added_lines_with_positions_junk_and_headerless():
+    assert GitHubClient._added_lines_with_positions(None) == []
+    assert GitHubClient._added_lines_with_positions("") == []
+    # Header-less shorthand (test fixtures) counts from line 1 — back-compat.
+    assert GitHubClient._added_lines_with_positions("+a = 1\n+b = 2") == [
+        (1, "a = 1"),
+        (2, "b = 2"),
+    ]
+
+
+def test_get_pull_request_data_line_map_aligns_with_code(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    items = [
+        {"filename": "a.py", "patch": "@@ -0,0 +5,2 @@\n+one\n+two"},
+        {"filename": "b.py", "patch": "@@ -1,1 +8,2 @@\n ctx\n+three"},
+    ]
+    monkeypatch.setattr(client, "get_pull_request_files", lambda *a, **k: items)
+
+    data = client.get_pull_request_data("octo", "repo", 7)
+
+    assert data["code"].splitlines() == ["one", "two", "three"]
+    assert data["line_map"] == [("a.py", 5), ("a.py", 6), ("b.py", 9)]
+
+
+def test_create_check_run_posts_payload_with_caps(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+    captured: dict = {}
+
+    def fake_json(method, url, headers, data=None):
+        captured.update({"method": method, "url": url, "headers": headers, "data": data})
+        return {"id": 55}
+
+    monkeypatch.setattr(client, "_http_json", fake_json)
+    annotations = [
+        {
+            "path": "a.py",
+            "start_line": i,
+            "end_line": i,
+            "annotation_level": "failure",
+            "message": "m",
+            "title": "t",
+        }
+        for i in range(1, 60)
+    ]
+    ok = client.create_check_run(
+        "octo",
+        "repo",
+        "sha123",
+        conclusion="failure",
+        title="T",
+        summary="S",
+        text="X" * 70_000,
+        annotations=annotations,
+    )
+
+    assert ok is True
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/repos/octo/repo/check-runs")
+    body = captured["data"]
+    assert body["name"] == GitHubClient.CHECK_RUN_NAME
+    assert body["head_sha"] == "sha123"
+    assert body["status"] == "completed"
+    assert body["conclusion"] == "failure"
+    assert body["output"]["title"] == "T"
+    assert len(body["output"]["annotations"]) == GitHubClient.MAX_CHECK_ANNOTATIONS
+    assert len(body["output"]["text"]) == GitHubClient.MAX_CHECK_TEXT
+
+
+def test_create_check_run_guards_and_failure(monkeypatch):
+    client = GitHubClient(app_id="123", installation_id="999", private_key="private")
+    monkeypatch.setattr(
+        client, "_get_installation_token", lambda: pytest.fail("guards must short-circuit")
+    )
+    kwargs = {"conclusion": "success", "title": "T", "summary": "S"}
+    assert client.create_check_run("", "repo", "sha", **kwargs) is False
+    assert client.create_check_run("octo", "repo", "", **kwargs) is False
+    assert client.create_check_run("octo", "repo", "sha", conclusion="", title="T", summary="S") is False
+
+    # Error response (e.g. 403: app lacks Checks:write) -> False, never raises.
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
+    monkeypatch.setattr(client, "_http_json", lambda *a, **k: None)
+    assert client.create_check_run("octo", "repo", "sha", **kwargs) is False
