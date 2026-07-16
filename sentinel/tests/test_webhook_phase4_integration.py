@@ -1,12 +1,14 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from sentinel.api.webhook_controller import get_document_service
-from sentinel.api.webhook_controller import get_github_client
-from sentinel.api.webhook_controller import get_llm_service
-from sentinel.api.webhook_controller import get_orchestrator
-from sentinel.api.webhook_controller import get_risk_engine
-from sentinel.api.webhook_controller import get_security_service
+from sentinel.api.webhook_controller import (
+    get_document_service,
+    get_github_client,
+    get_llm_service,
+    get_orchestrator,
+    get_risk_engine,
+    get_security_service,
+)
 from sentinel.api.webhook_controller import router as webhook_router
 from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.domain.entities.finding import Finding

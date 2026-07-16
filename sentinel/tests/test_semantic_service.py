@@ -1,4 +1,3 @@
-import pytest
 
 from sentinel.domain.entities.finding import Finding
 from sentinel.domain.services.semantic_service import SemanticService

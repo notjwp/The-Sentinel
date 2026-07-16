@@ -1,7 +1,5 @@
 from sentinel.application.risk_engine import RiskEngine
 from sentinel.domain.entities.finding import Finding
-from sentinel.domain.services.debt_service import DebtService
-from sentinel.domain.services.security_service import SecurityService
 from sentinel.domain.services.semantic_service import SemanticService
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.infrastructure.semantic.embedding_engine import EmbeddingEngine

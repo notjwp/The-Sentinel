@@ -1,10 +1,7 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from sentinel.api.webhook_controller import get_llm_service
-from sentinel.api.webhook_controller import get_orchestrator
-from sentinel.api.webhook_controller import get_risk_engine
-from sentinel.api.webhook_controller import get_security_service
+from sentinel.api.webhook_controller import get_llm_service, get_orchestrator, get_risk_engine, get_security_service
 from sentinel.api.webhook_controller import router as webhook_router
 from sentinel.domain.entities.finding import Finding
 from sentinel.domain.value_objects.severity_level import SeverityLevel

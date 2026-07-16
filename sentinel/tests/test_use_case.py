@@ -3,6 +3,7 @@ import pytest
 from sentinel.application.risk_engine import RiskEngine
 from sentinel.workers.background_worker import BackgroundWorker
 
+
 def _execute(job: dict) -> str:
     return BackgroundWorker.process_job(job, RiskEngine())
 

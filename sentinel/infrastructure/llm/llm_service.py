@@ -141,6 +141,42 @@ class LLMService:
             result[fid] = {"explanation": explanation, "fix": fix}
         return result
 
+    def explain_issue_safe(
+        self,
+        code: str,
+        issue: str,
+        *,
+        severity: SeverityLevel | str | None = None,
+    ) -> str:
+        """One-shot LLM text task (report translation, doc review). Never raises.
+
+        ``issue`` carries the instruction, ``code`` the content it applies to
+        (append_translations passes the report + a translate instruction).
+        Returns FALLBACK_EXPLANATION when the LLM is disabled, the LLM_MAX_CALLS
+        budget is spent, the provider lacks generate_text, or the call fails —
+        callers (append_translations) treat that value as "skip the section".
+        """
+        _ = severity  # part of the DocumentLLMReviewer protocol; unused here
+        if not self._can_invoke() or not hasattr(self.provider, "generate_text"):
+            self.logger.info("LLM text task skipped; using fallback response.")
+            return self.FALLBACK_EXPLANATION
+
+        try:
+            self.call_count += 1  # shares the per-request budget with enrichment
+            content = self.provider.generate_text(f"{issue}\n\n---\n\n{code}")
+        except Exception:
+            self.logger.exception("LLM text task failed; using fallback response.")
+            metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "fallback"})
+            return self.FALLBACK_EXPLANATION
+
+        if not content or not str(content).strip():
+            self.logger.warning("LLM text task returned empty content; using fallback.")
+            metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "fallback"})
+            return self.FALLBACK_EXPLANATION
+
+        metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "success"})
+        return str(content).strip()
+
     def generate_pr_audit(self, code: str, findings: list) -> dict[int, dict[str, str]]:
         enrichable = []
         for finding in findings:

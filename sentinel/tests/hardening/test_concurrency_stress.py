@@ -67,7 +67,6 @@ def test_1000_concurrent_webhook_posts_no_deadlock():
 
 def test_no_duplicate_processing_in_concurrent_posts():
     client, _ = _build_client()
-    seen_indices: list[int] = []
 
     class _TrackingOrchestrator:
         def __init__(self) -> None:

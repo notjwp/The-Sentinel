@@ -1,9 +1,8 @@
 import asyncio
 
+import sentinel.workers.background_worker as bw_module
 from sentinel.workers.background_worker import BackgroundWorker
 from sentinel.workers.job_queue import JobQueue
-import sentinel.workers.background_worker as bw_module
-
 
 # --- Worker Start ---
 

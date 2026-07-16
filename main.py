@@ -1,20 +1,20 @@
-"""
-Context Update Checklist:
-- Update PROJECT_CONTEXT.md after meaningful code/config/dependency changes.
-- Add a short Working Log entry with date, summary, files changed, and follow-ups.
-- Keep run/test command changes documented.
-- Keep .env usage and env-variable expectations documented.
+"""The Sentinel — FastAPI composition root.
+
+Wires the job queue (in-memory, or Redis when REDIS_URL is set), the audit
+orchestrator, the background worker (started via lifespan), and the routers
+(webhook, health, metrics).
 """
 
 import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from sentinel.application.audit_orchestrator import AuditOrchestrator
-from sentinel.api.webhook_controller import router as webhook_router
-from sentinel.api.webhook_controller import get_orchestrator
+
 from sentinel.api.health_controller import router as health_router
 from sentinel.api.metrics_controller import router as metrics_router
+from sentinel.api.webhook_controller import get_orchestrator
+from sentinel.api.webhook_controller import router as webhook_router
+from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.config.settings import get_settings
 from sentinel.infrastructure.redis.redis_job_queue import RedisJobQueue
 from sentinel.monitoring.logger import get_logger

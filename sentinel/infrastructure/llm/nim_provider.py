@@ -149,6 +149,12 @@ class NIMProvider(LLMProvider):
 
         return None
 
+    def generate_text(self, prompt: str) -> str | None:
+        """One-shot free-form completion; reuses _chat's retry/sanitize handling."""
+        if not isinstance(prompt, str) or not prompt.strip():
+            return None
+        return self._chat("", prompt)
+
     def generate_pr_audit(self, code: str, findings_summary: str) -> str | None:
         prompt = (
             "You are a senior secure code reviewer. Review the pull request and the "

@@ -1,12 +1,8 @@
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends
-from fastapi import HTTPException
-from fastapi import Request
-from pydantic import BaseModel
-from pydantic import ConfigDict
-from pydantic import Field
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from sentinel.api.delivery_dedup import DeliveryDeduper
 from sentinel.api.webhook_security import verify_webhook_signature

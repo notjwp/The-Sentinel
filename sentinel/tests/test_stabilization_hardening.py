@@ -2,13 +2,13 @@ import asyncio
 
 import pytest
 
+import sentinel.workers.background_worker as bw_module
 from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
 from sentinel.domain.entities.finding import Finding
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.workers.background_worker import BackgroundWorker
 from sentinel.workers.job_queue import JobQueue
-import sentinel.workers.background_worker as bw_module
 
 
 class _ExplodingDebtService:

@@ -164,7 +164,6 @@ def test_orchestrator_propagates_queue_failure():
 
 
 def test_worker_survives_bad_job_and_processes_next(capsys):
-    import sentinel.workers.background_worker as bw_module
 
     real_sleep = asyncio.sleep
 
@@ -175,12 +174,6 @@ def test_worker_survives_bad_job_and_processes_next(capsys):
         queue = JobQueue()
         await queue.enqueue({"bad": "job"})
         await queue.enqueue({"repo": "ok", "pr_number": 99})
-
-        from sentinel.workers.background_worker import BackgroundWorker
-
-        worker = BackgroundWorker(queue)
-
-        original_start = worker.start
 
         async def _patched_start() -> None:
             from sentinel.application.risk_engine import RiskEngine

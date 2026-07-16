@@ -41,6 +41,5 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install ruff==0.15.21
-      - name: Ruff (advisory)
+      - name: Ruff
         run: ruff check sentinel main.py
-        continue-on-error: true

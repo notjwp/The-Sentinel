@@ -186,9 +186,9 @@ def test_worker_loop_continues_after_use_case_failure(capsys):
         while processed < 2:
             job = await queue.dequeue()
             try:
-                report = BackgroundWorker.process_job(job, engine)
+                BackgroundWorker.process_job(job, engine)
             except (KeyError, TypeError):
-                report = None
+                pass
             processed += 1
             await real_sleep(0)
 

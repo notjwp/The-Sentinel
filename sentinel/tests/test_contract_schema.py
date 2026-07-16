@@ -3,7 +3,6 @@ from sentinel.domain.entities.finding import Finding
 from sentinel.domain.services.debt_service import DebtService
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 
-
 EXPECTED_KEYS = {
     "severity",
     "complexity",

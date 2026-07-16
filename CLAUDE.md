@@ -28,7 +28,7 @@ pytest --cov=sentinel --cov-branch --cov-report=term-missing
 # Hardening tests only
 pytest sentinel/tests/hardening/ -v
 
-# Lint (advisory in CI; run locally before pushing)
+# Lint (ENFORCED in CI; run locally before pushing)
 ruff check sentinel main.py
 
 # Mutation testing (targets domain/application/infrastructure)
@@ -79,7 +79,7 @@ FastAPI/sklearn/infrastructure) is **enforced by tests** in `sentinel/tests/hard
 
 ### Feature flags (`sentinel/config/settings.py`, read from `.env`)
 
-Read settings only via `get_settings()`. Defaults: `ENABLE_LLM=true`, `ENABLE_GITHUB=true`, `ENABLE_CHECKS=true` (needs the app's Checks:write permission to actually post), `ENABLE_DOC_REVIEW=true`, `ENABLE_TRANSLATION=false`, `LLM_MAX_CALLS=1`, `LLM_TIMEOUT=5.0`, `REDIS_URL` unset (in-memory queue/dedup; set it — e.g. `redis://localhost:6379/0` — for durable, restart-surviving state; docker-compose wires `redis://redis:6379/0`). GitHub/LLM are effectively inert without their credentials even when flag is on (LLM requires a resolved `LLM_API_KEY`; translation requires the LLM service to be present). `GITHUB_WEBHOOK_SECRET` (default unset) gates webhook signature verification — see the note above; in production set it, or the endpoint accepts unsigned requests (a startup warning fires when `ENABLE_GITHUB` is on without it).
+Read settings only via `get_settings()`. Defaults: `ENABLE_LLM=true`, `ENABLE_GITHUB=true`, `ENABLE_CHECKS=true` (needs the app's Checks:write permission to actually post), `ENABLE_DOC_REVIEW=true`, `ENABLE_TRANSLATION=false`, `LLM_MAX_CALLS=1`, `LLM_TIMEOUT=5.0`, `REDIS_URL` unset (in-memory queue/dedup; set it — e.g. `redis://localhost:6379/0` — for durable, restart-surviving state; docker-compose wires `redis://redis:6379/0`). GitHub/LLM are effectively inert without their credentials even when flag is on (LLM requires a resolved `LLM_API_KEY`). **Translation is real but budget-gated:** `append_translations` → `LLMService.explain_issue_safe` shares the `LLM_MAX_CALLS` budget with enrichment, so with the default `1` translations always skip — enabling them for real means `ENABLE_TRANSLATION=true` **and** `LLM_MAX_CALLS>=3` (1 enrichment + 1 per language). `GITHUB_WEBHOOK_SECRET` (default unset) gates webhook signature verification — see the note above; in production set it, or the endpoint accepts unsigned requests (a startup warning fires when `ENABLE_GITHUB` is on without it).
 
 **LLM provider is env-configurable (any OpenAI-compatible endpoint).** `LLM_BASE_URL` (default `https://integrate.api.nvidia.com/v1`), `LLM_MODEL` (default `deepseek-ai/deepseek-v4-flash`), and `LLM_API_KEY` are threaded `Settings → LLMService → NIMProvider` (whose class constants are only fallbacks). `LLM_API_KEY` **falls back to `NVIDIA_API_KEY`** when unset (back-compat), and the LLM-enabled gate is `ENABLE_LLM and bool(LLM_API_KEY)`. Switching providers (a working NVIDIA model, Groq, Gemini, Ollama…) is a `.env` change, no code edit — see `.env.example` for ready presets. `NIMProvider` is a misnomer now: it's a generic OpenAI-compatible client, not NVIDIA-specific.
 
@@ -88,8 +88,8 @@ Read settings only via `get_settings()`. Defaults: `ENABLE_LLM=true`, `ENABLE_GI
 - **Dependency split** (see Commands): `requirements.txt` runtime-only; `requirements-dev.txt` dev tooling. The production `Dockerfile` installs only `requirements.txt` (so the image excludes pytest/mutmut/ruff); `mutation.Dockerfile` and CI install `requirements-dev.txt`.
 - **Container:** `Dockerfile` builds a non-root image running `uvicorn main:app` on `:8000` with a `/health` HEALTHCHECK; `docker-compose.yml` runs it locally (expects a local `.env`) alongside a `redis:7-alpine` service (AOF-persisted volume) and points the app at it via `REDIS_URL`.
 - **Redis tests need no server:** unit tests inject `fakeredis.FakeAsyncRedis` through the `client=` seam on both Redis classes; CI stays service-container-free.
-- **CI:** `.github/workflows/ci.yml` has three jobs — `test` (pytest + branch coverage, `--cov-fail-under=85`; actual ≈88%), `docker` (image build, `needs: test`), and `lint` (Ruff, **advisory / `continue-on-error`** — the repo has ~30 unaddressed violations by design). Ruff config is in `pyproject.toml` (`select = E,F,I`).
+- **CI:** `.github/workflows/ci.yml` has three jobs — `test` (pytest + branch coverage, `--cov-fail-under=85`; actual ≈88%), `docker` (image build, `needs: test`), and `lint` (Ruff, **enforcing** — the repo is at zero violations; keep it there). Ruff config is in `pyproject.toml` (`select = E,F,I`).
 
 ## Project convention
 
-`PROJECT_CONTEXT.md` (a hand-maintained working log) **has been removed**. The `main.py` module docstring and the `.githooks/pre-commit` reminder still reference it — those reminders are now vestigial. Treat the actual code as the source of truth.
+There is no hand-maintained working log — `PROJECT_CONTEXT.md` and its reminders (the old `main.py` checklist docstring, the `.githooks/pre-commit` hook) were removed. Treat the actual code (and this file) as the source of truth.
