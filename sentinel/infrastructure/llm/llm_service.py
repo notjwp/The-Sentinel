@@ -32,6 +32,10 @@ class LLMService:
     FALLBACK_FIX = "Use parameterized queries or validate input."
     FALLBACK_EXPLANATION = "Potential security issue detected. Review code manually."
 
+    # Upper bound on the matched snippet sent per finding: long enough to identify
+    # the offending code, short enough that one huge match can't dominate the prompt.
+    MAX_MATCH_CHARS = 120
+
     # Matches an "Issue:/Explanation:/Fix:" label at the start of a line, tolerating
     # markdown emphasis/bullets/headings around it (e.g. "**Explanation:**", "### Fix:",
     # "- Issue:"). A trailing colon is required so code lines like `def fix():` don't match.
@@ -77,6 +81,35 @@ class LLMService:
         if isinstance(severity, str):
             return severity.upper()
         return "LOW"
+
+    @classmethod
+    def _summarize_finding(cls, index: int, finding) -> str:
+        """One prompt entry: what the rule found, where, and the text that matched.
+
+        The matched snippet is the point. Sent only a rule slug, the model reasons
+        about the slug itself — observed in production, it read the rule name
+        ``openai_key`` as a variable and "fixed" it with ``openai_key = None``
+        instead of addressing the hardcoded key on the line. The snippet is
+        whitespace-collapsed to one line (a multi-line match would otherwise break
+        the numbered-list shape the response parser relies on) and truncated, so a
+        pathological match can't crowd out the other findings.
+
+        Nothing new is disclosed: ``generate_pr_audit`` already sends the full PR
+        code in the same request, and the match is a substring of it.
+        """
+        parts = [f"{index}. [{finding.rule}] {finding.description or finding.rule}".rstrip()]
+        parts.append(f"   Severity: {cls._severity_name(finding.severity)}")
+        if isinstance(finding.line, int):
+            parts.append(f"   Line: {finding.line}")
+        match = getattr(finding, "match", None)
+        if isinstance(match, str) and match.strip():
+            snippet = " ".join(match.split())
+            if len(snippet) > cls.MAX_MATCH_CHARS:
+                snippet = snippet[: cls.MAX_MATCH_CHARS] + " ...(truncated)"
+            parts.append(f"   Matched code: {snippet}")
+        if finding.recommendation:
+            parts.append(f"   Suggested direction: {finding.recommendation}")
+        return "\n".join(parts)
 
     def _can_invoke(self) -> bool:
         if not self.enable_llm:
@@ -192,12 +225,9 @@ class LLMService:
                 metrics.counter_inc("sentinel_llm_calls_total", {"outcome": "fallback"})
             return {id(f): {"explanation": self.FALLBACK_EXPLANATION, "fix": self.FALLBACK_FIX} for f in enrichable}
 
-        summary_lines = []
-        for i, f in enumerate(enrichable, 1):
-            severity = self._severity_name(f.severity)
-            summary_lines.append(f"{i}. {f.rule}\n   Severity: {severity}")
-
-        findings_summary = "\n\n".join(summary_lines)
+        findings_summary = "\n\n".join(
+            self._summarize_finding(i, f) for i, f in enumerate(enrichable, 1)
+        )
 
         self.logger.info("LLM PR audit started")
         try:
