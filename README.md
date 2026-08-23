@@ -40,13 +40,22 @@ building, check-run payloads, and optional translation.
 `X-Hub-Signature-256` when `GITHUB_WEBHOOK_SECRET` is set, and re-sent deliveries are
 deduplicated by `X-GitHub-Delivery` (HTTP 200 `{"status": "duplicate"}`, no re-processing).
 
+**Which deliveries are reviewed.** When an `X-GitHub-Event` header is present, only
+`pull_request` events whose action is `opened`, `synchronize`, `reopened`, or
+`ready_for_review` start a review. Everything else — `ping`, `issue_comment`, `push`,
+`pull_request.closed`/`labeled`/`edited` — is answered HTTP 200 `{"status": "ignored"}`
+with no work done, so a PR is not re-reviewed every time someone comments on it. A request
+with no `X-GitHub-Event` header is never filtered (local `curl`, manual replays).
+
 1. **Queued (async) mode** — payload has repo/pr_number but **no `code`**. Enqueues a job
    (durable in Redis when `REDIS_URL` is set); the `BackgroundWorker` then fetches the PR's
    real diff from GitHub (`GitHubClient.get_pull_request_data`, paginated beyond 100 files),
    builds the semantic corpus from the base ref, assesses risk, LLM-enriches the findings,
    and posts back **both** a PR comment and a native **check run** — conclusion
    `failure`/`neutral`/`success` by severity, with annotations mapped to the exact file lines
-   at the head commit (patch hunk arithmetic).
+   at the head commit (patch hunk arithmetic). If the PR fetch itself fails, no comment is
+   posted and the check run is `neutral` ("Review skipped") — a GitHub outage never reads as
+   a clean PR.
 2. **Synchronous mode** — payload has `code`. Runs the same review inline and returns
    findings plus a markdown report in the HTTP response.
 
@@ -63,6 +72,10 @@ strings, skip, or retry with exponential backoff, never crashing the request.
 - **Redis-backed queue** (opt-in via `REDIS_URL`): at-least-once delivery — jobs survive
   process crashes, an interrupted job is recovered from the processing list on restart, and
   webhook dedup state survives restarts too. Safe to re-run because posting is idempotent.
+  Retries are bounded: after `MAX_ATTEMPTS` recoveries a job is parked on
+  `sentinel:jobs:dead` rather than resurrected forever.
+- **Graceful shutdown**: a job in flight when the process is asked to stop is allowed to
+  finish and acknowledge (bounded by `SHUTDOWN_GRACE_SECONDS`) instead of being abandoned.
 - **`GET /metrics`**: Prometheus text format, no client library — jobs processed, per-job
   duration, risk severities, webhook modes, LLM success/fallback, GitHub post outcomes,
   Redis errors, live queue depth.
