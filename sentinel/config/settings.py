@@ -38,6 +38,7 @@ def _to_float(value: str | None, default: float) -> float:
 
 @dataclass(frozen=True)
 class Settings:
+    ENVIRONMENT: str
     NVIDIA_API_KEY: str | None
     ENABLE_LLM: bool
     LLM_MAX_CALLS: int
@@ -54,10 +55,19 @@ class Settings:
     GITHUB_PRIVATE_KEY: str | None
     GITHUB_API_BASE_URL: str
     GITHUB_WEBHOOK_SECRET: str | None
+    METRICS_TOKEN: str | None
     REDIS_URL: str | None
 
 
 def get_settings() -> Settings:
+    # Deployment posture. "production" makes the webhook-secret requirement
+    # fail-closed at startup (see main.py); anything else preserves the
+    # historical warn-and-continue behavior for local dev and the test suite.
+    raw_environment = os.getenv("ENVIRONMENT")
+    environment = raw_environment.strip().lower() if raw_environment is not None else ""
+    if environment == "":
+        environment = "development"
+
     raw_key = os.getenv("NVIDIA_API_KEY")
     nvidia_key = raw_key.strip() if raw_key is not None else None
     if nvidia_key == "":
@@ -105,6 +115,12 @@ def get_settings() -> Settings:
     if github_webhook_secret == "":
         github_webhook_secret = None
 
+    # Bearer token guarding GET /metrics. Unset -> endpoint stays open (dev default).
+    raw_metrics_token = os.getenv("METRICS_TOKEN")
+    metrics_token = raw_metrics_token.strip() if raw_metrics_token is not None else None
+    if metrics_token == "":
+        metrics_token = None
+
     # Durable queue/dedup backend. Unset -> in-memory (single-process, non-durable).
     raw_redis_url = os.getenv("REDIS_URL")
     redis_url = raw_redis_url.strip() if raw_redis_url is not None else None
@@ -112,6 +128,7 @@ def get_settings() -> Settings:
         redis_url = None
 
     return Settings(
+        ENVIRONMENT=environment,
         NVIDIA_API_KEY=nvidia_key,
         ENABLE_LLM=_to_bool(os.getenv("ENABLE_LLM"), True),
         LLM_MAX_CALLS=_to_int(os.getenv("LLM_MAX_CALLS"), 1),
@@ -128,5 +145,6 @@ def get_settings() -> Settings:
         GITHUB_PRIVATE_KEY=github_private_key,
         GITHUB_API_BASE_URL=github_api_base_url,
         GITHUB_WEBHOOK_SECRET=github_webhook_secret,
+        METRICS_TOKEN=metrics_token,
         REDIS_URL=redis_url,
     )

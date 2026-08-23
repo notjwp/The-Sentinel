@@ -34,20 +34,40 @@ audit_orchestrator = AuditOrchestrator(job_queue)
 background_worker = BackgroundWorker(job_queue)
 
 
+def verify_startup_config(settings) -> None:
+    """Refuse to boot on a configuration that would expose an unsigned webhook.
+
+    Fail-closed only under ENVIRONMENT=production: an unsigned public /webhook is
+    the one misconfiguration that must never start quietly. Anywhere else keeps
+    the historical warn-and-continue, so local dev and the test suite (which set
+    no secret) are unaffected. Pure and importable so it is testable without
+    booting the app.
+    """
+    if not settings.ENABLE_GITHUB or settings.GITHUB_WEBHOOK_SECRET:
+        return
+    if settings.ENVIRONMENT == "production":
+        raise RuntimeError(
+            "ENVIRONMENT=production with ENABLE_GITHUB but no GITHUB_WEBHOOK_SECRET — "
+            "refusing to start: the webhook would accept unsigned requests."
+        )
+    logger.warning(
+        "ENABLE_GITHUB is on but GITHUB_WEBHOOK_SECRET is unset — "
+        "webhook signature verification is DISABLED. Set it before public exposure."
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
+    # Validate BEFORE starting the worker: raising afterwards would orphan its task.
+    verify_startup_config(settings)
+
     logger.info("Starting background worker")
     app.state.worker_task = asyncio.create_task(background_worker.start())
-    settings = get_settings()
     logger.info(
         "Queue/dedup backend: %s",
         "redis (durable)" if settings.REDIS_URL else "in-memory (non-durable)",
     )
-    if settings.ENABLE_GITHUB and not settings.GITHUB_WEBHOOK_SECRET:
-        logger.warning(
-            "ENABLE_GITHUB is on but GITHUB_WEBHOOK_SECRET is unset — "
-            "webhook signature verification is DISABLED. Set it before public exposure."
-        )
     try:
         yield
     finally:

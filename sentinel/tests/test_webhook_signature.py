@@ -69,3 +69,70 @@ def test_webhook_with_secret_accepts_valid_signature(monkeypatch):
 def test_is_valid_signature_non_ascii_header_returns_false():
     # A non-ASCII signature header must not raise (would 500); it must be rejected.
     assert is_valid_signature("s3cret", b'{"repo":"r"}', "sha256=\xff") is False
+
+
+# --- M9: fail-closed startup in production ---
+
+
+def _settings(**overrides):
+    """Build a Settings from the real parser with env overrides applied."""
+    import os
+
+    from sentinel.config.settings import get_settings
+
+    saved = {k: os.environ.get(k) for k in overrides}
+    try:
+        for k, v in overrides.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return get_settings()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_production_without_webhook_secret_refuses_to_start():
+    """The one misconfiguration that must never boot quietly."""
+    import pytest
+
+    from main import verify_startup_config
+
+    settings = _settings(ENVIRONMENT="production", ENABLE_GITHUB="true", GITHUB_WEBHOOK_SECRET=None)
+    assert settings.ENVIRONMENT == "production"
+
+    with pytest.raises(RuntimeError, match="refusing to start"):
+        verify_startup_config(settings)
+
+
+def test_production_with_webhook_secret_starts():
+    from main import verify_startup_config
+
+    settings = _settings(
+        ENVIRONMENT="production", ENABLE_GITHUB="true", GITHUB_WEBHOOK_SECRET="s3cret"
+    )
+    verify_startup_config(settings)  # must not raise
+
+
+def test_development_without_secret_only_warns():
+    """Regression guard for the whole pre-M9 suite, which sets no secret."""
+    from main import verify_startup_config
+
+    settings = _settings(ENVIRONMENT=None, ENABLE_GITHUB="true", GITHUB_WEBHOOK_SECRET=None)
+    assert settings.ENVIRONMENT == "development"
+
+    verify_startup_config(settings)  # warns, does not raise
+
+
+def test_production_with_github_disabled_starts_without_a_secret():
+    """No GitHub traffic means no unsigned-webhook exposure to guard against."""
+    from main import verify_startup_config
+
+    settings = _settings(
+        ENVIRONMENT="production", ENABLE_GITHUB="false", GITHUB_WEBHOOK_SECRET=None
+    )
+    verify_startup_config(settings)  # must not raise

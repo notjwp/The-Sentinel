@@ -174,3 +174,59 @@ def test_in_memory_queue_depth():
         assert await queue.depth() == 2
 
     asyncio.run(_run())
+
+
+# ── M9: /metrics bearer-token gate ─────────────────────────────────────────────
+
+
+def _metrics_client() -> TestClient:
+    app = FastAPI()
+    app.include_router(metrics_router)
+    app.state.job_queue = JobQueue()
+    return TestClient(app)
+
+
+def test_metrics_open_when_no_token_configured(monkeypatch):
+    """Default behavior is unchanged — local scraping and the suite keep working."""
+    monkeypatch.delenv("METRICS_TOKEN", raising=False)
+    response = _metrics_client().get("/metrics")
+    assert response.status_code == 200
+
+
+def test_metrics_requires_bearer_when_token_configured(monkeypatch):
+    monkeypatch.setenv("METRICS_TOKEN", "sup3r-s3cret")
+    client = _metrics_client()
+
+    assert client.get("/metrics").status_code == 401
+    assert client.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/metrics", headers={"Authorization": "sup3r-s3cret"}).status_code == 401
+
+
+def test_metrics_accepts_the_configured_bearer(monkeypatch):
+    monkeypatch.setenv("METRICS_TOKEN", "sup3r-s3cret")
+    response = _metrics_client().get(
+        "/metrics", headers={"Authorization": "Bearer sup3r-s3cret"}
+    )
+    assert response.status_code == 200
+    assert "sentinel_queue_depth" in response.text
+
+
+def test_metrics_rejects_non_ascii_header_without_crashing(monkeypatch):
+    """Byte comparison, like the webhook HMAC — a weird header is 401, not 500.
+
+    Exercised against the dependency directly: httpx refuses to transmit a
+    non-ASCII header value, so this can't be reached through the test client.
+    """
+    import pytest
+    from fastapi import HTTPException
+
+    from sentinel.api.metrics_controller import verify_metrics_token
+
+    monkeypatch.setenv("METRICS_TOKEN", "sup3r-s3cret")
+
+    class _Req:
+        headers = {"Authorization": "Bearer éé"}
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(verify_metrics_token(_Req()))
+    assert exc.value.status_code == 401

@@ -28,7 +28,11 @@ USER sentinel
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD curl -fsS http://localhost:8000/health || exit 1
+# PORT is injected by several hosts (Render, Railway, Cloud Run); 8000 stays the
+# default so compose, Fly, and a plain `docker run` are unchanged.
+ENV PORT=8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl -fsS "http://localhost:${PORT}/health" || exit 1
+
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

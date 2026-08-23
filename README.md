@@ -163,7 +163,17 @@ editing `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` — no code change. See
 
 Create a GitHub App (Settings → Developer settings → GitHub Apps) with **Repository
 permissions**: Pull requests (Read & write), Issues (Read & write), Checks (Read & write),
-Contents (Read-only); webhook can stay disabled for manual triggering. Install it on the
+Contents (Read-only); webhook can stay disabled for manual triggering.
+
+> **Changing permissions on an already-installed App needs re-approval.** GitHub raises a
+> pending request on the installation; until you accept it the token keeps its old scopes.
+> A missing **Checks: Read & write** is the usual cause of "the comment posted but no check
+> run appeared" — `create_check_run` fails safely and only logs `check run=False`.
+
+**Going public.** Set `GITHUB_WEBHOOK_SECRET` (and the same value on the App's webhook),
+`METRICS_TOKEN`, and `ENVIRONMENT=production` — the last makes the secret mandatory, so the
+app refuses to start rather than serve an unsigned endpoint. Subscribe the App to
+**Pull requests only**: Sentinel ignores every other event anyway. Install it on the
 target repo, then set `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID` (from the installation URL),
 and `GITHUB_PRIVATE_KEY` (the downloaded PEM, single line with `\n` separators is accepted).
 
@@ -191,7 +201,7 @@ docker compose up --build
 |---|---|---|
 | `GET` | `/` | Root health message |
 | `GET` | `/health` | Health status |
-| `GET` | `/metrics` | Prometheus-format metrics (counters, durations, live queue depth) |
+| `GET` | `/metrics` | Prometheus-format metrics (counters, durations, live queue depth). Requires `Authorization: Bearer $METRICS_TOKEN` when that is set; open otherwise |
 | `POST` | `/webhook` | Receives PR events for auditing (queued or synchronous) |
 
 ## Test
