@@ -55,6 +55,7 @@
         "type": "object"
       },
       "WebhookPayload": {
+        "description": "The fields a caller may supply directly.\n\nA real GitHub delivery sets none of these \u2014 everything is read out of the\nnested event body by the extractors below. They exist for manual triggering\n(\"review owner/name#12\") and are treated as overrides when present.\n\nThere is deliberately no ``code`` field: the endpoint never analyzes\ncaller-supplied source. See the module note on the route.",
         "properties": {
           "author": {
             "anyOf": [
@@ -67,17 +68,6 @@
               }
             ],
             "title": "Author"
-          },
-          "code": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Code"
           },
           "files": {
             "anyOf": [
@@ -107,7 +97,7 @@
           "repo": {
             "anyOf": [
               {
-                "maxLength": 1048576,
+                "maxLength": 1024,
                 "minLength": 1,
                 "type": "string"
               },
@@ -173,6 +163,7 @@
     },
     "/webhook": {
       "post": {
+        "description": "Accept a delivery and queue a review. Never analyzes caller-supplied code.\n\nThe endpoint identifies a pull request and hands it to the worker, which\nfetches the real diff from the GitHub API itself. An earlier synchronous\nmode analyzed a ``code`` field posted in the request body; it was removed\nbecause it made a public endpoint an arbitrary-code-analysis service, and\nreal GitHub deliveries never carried that field.\n\nOrder matters: signature (route dependency) -> event filter -> dedup ->\nenqueue. Filtering ahead of dedup means an ignored event never consumes a\ndedup slot, and every outcome answers 200 because GitHub records any\nnon-2xx as a failed delivery.",
         "operationId": "webhook_webhook_post",
         "requestBody": {
           "content": {

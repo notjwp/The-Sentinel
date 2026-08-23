@@ -1,4 +1,3 @@
-import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
@@ -8,13 +7,7 @@ from sentinel.api.delivery_dedup import DeliveryDeduper
 from sentinel.api.webhook_events import should_process
 from sentinel.api.webhook_security import verify_webhook_signature
 from sentinel.application.audit_orchestrator import AuditOrchestrator
-from sentinel.application.risk_engine import RiskEngine
 from sentinel.config.settings import get_settings
-from sentinel.domain.services.document_service import DocumentService
-from sentinel.domain.services.security_service import SecurityService
-from sentinel.domain.value_objects.severity_level import SeverityLevel
-from sentinel.infrastructure.github.github_client import GitHubClient
-from sentinel.infrastructure.llm.llm_service import LLMService
 from sentinel.infrastructure.redis.redis_delivery_dedup import RedisDeliveryDeduper
 from sentinel.monitoring.logger import get_logger
 from sentinel.monitoring.metrics import metrics
@@ -42,75 +35,26 @@ _deduper = _build_deduper()
 
 
 class WebhookPayload(BaseModel):
+    """The fields a caller may supply directly.
+
+    A real GitHub delivery sets none of these — everything is read out of the
+    nested event body by the extractors below. They exist for manual triggering
+    ("review owner/name#12") and are treated as overrides when present.
+
+    There is deliberately no ``code`` field: the endpoint never analyzes
+    caller-supplied source. See the module note on the route.
+    """
+
     model_config = ConfigDict(extra="ignore")
 
-    repo: str | None = Field(default=None, min_length=1, max_length=1024 * 1024)
+    repo: str | None = Field(default=None, min_length=1, max_length=1024)
     pr_number: int | None = None
     author: str | None = Field(default=None, max_length=256)
     files: list[str] | None = None
-    code: str | None = None
 
 
 def get_orchestrator() -> AuditOrchestrator:
     raise RuntimeError("AuditOrchestrator dependency is not configured")
-
-
-def get_security_service() -> SecurityService:
-    return SecurityService()
-
-
-def get_risk_engine() -> RiskEngine:
-    return RiskEngine()
-
-
-def get_llm_service() -> LLMService:
-    settings = get_settings()
-    llm_enabled = settings.ENABLE_LLM and bool(settings.LLM_API_KEY)
-    return LLMService(
-        enable_llm=llm_enabled,
-        max_calls=settings.LLM_MAX_CALLS,
-        timeout=settings.LLM_TIMEOUT,
-        api_key=settings.LLM_API_KEY,
-        base_url=settings.LLM_BASE_URL,
-        model=settings.LLM_MODEL,
-    )
-
-
-def get_document_service() -> DocumentService:
-    return DocumentService()
-
-
-def get_github_client() -> GitHubClient | None:
-    settings = get_settings()
-    if not settings.ENABLE_GITHUB:
-        return None
-
-    return GitHubClient(
-        app_id=settings.GITHUB_APP_ID,
-        installation_id=settings.GITHUB_INSTALLATION_ID,
-        private_key=settings.GITHUB_PRIVATE_KEY,
-        api_base_url=settings.GITHUB_API_BASE_URL,
-    )
-
-
-def _resolve_override(request: Request, dependency: Any) -> Any:
-    app = getattr(request, "app", None)
-    overrides = getattr(app, "dependency_overrides", None)
-    if isinstance(overrides, dict):
-        override = overrides.get(dependency)
-        if override is not None:
-            return override()
-    return dependency()
-
-
-def _resolve_override_if_present(request: Request, dependency: Any) -> Any | None:
-    app = getattr(request, "app", None)
-    overrides = getattr(app, "dependency_overrides", None)
-    if isinstance(overrides, dict):
-        override = overrides.get(dependency)
-        if override is not None:
-            return override()
-    return None
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -123,7 +67,7 @@ async def _raw_json(request: Request) -> dict[str, Any]:
     """Best-effort parse of the request body as a JSON object; {} on anything else.
 
     Starlette caches the body, so calling this alongside the signature
-    dependency and the later ``await request.json()`` reads it only once.
+    dependency reads it only once.
     """
     try:
         parsed = await request.json()
@@ -221,268 +165,32 @@ def _extract_files(raw_payload: dict[str, Any], fallback_files: list[str] | None
     return files
 
 
-def _extract_file_contents(raw_payload: dict[str, Any]) -> dict[str, str]:
-    raw_files = raw_payload.get("files")
-    if not isinstance(raw_files, list):
-        return {}
+def _build_job(raw_payload: dict[str, Any], payload: WebhookPayload) -> dict[str, Any]:
+    """Resolve a delivery into the job the worker needs: who, which repo, which PR.
 
-    file_contents: dict[str, str] = {}
-    for item in raw_files:
-        if not isinstance(item, dict):
-            continue
-
-        file_name = item.get("filename") or item.get("path")
-        if not isinstance(file_name, str):
-            continue
-
-        content = item.get("content")
-        if isinstance(content, str):
-            file_contents[file_name] = content
-            continue
-
-        patch = item.get("patch")
-        if isinstance(patch, str):
-            file_contents[file_name] = patch
-
-    return file_contents
-
-
-def _run_sync_review(
-    *,
-    code: str,
-    risk_engine: RiskEngine,
-    orchestrator: AuditOrchestrator,
-    document_service: DocumentService,
-    github_client: GitHubClient | None,
-    owner: str | None,
-    repo_name: str | None,
-    pr_number: int | None,
-    files: list[str],
-    file_contents: dict[str, str],
-) -> dict[str, Any]:
-    """Run the synchronous review pipeline (assess -> enrich/report -> post).
-
-    Pure blocking work (sklearn + openai + urllib). ``_webhook_impl`` runs it via
-    ``asyncio.to_thread`` so it never executes on the event loop, keeping the server
-    responsive to other requests while one sync review is in flight.
+    Directly-supplied fields win; everything else is read out of the nested
+    GitHub event body. ``owner`` is threaded separately because ``repo`` may
+    arrive either as ``owner/name`` or bare, and the worker's ``_identity``
+    needs the owner to build a well-formed API URL.
     """
-    risk_result = risk_engine.assess(code=code)
-    findings = risk_result.get("security", {}).get("findings", [])
-    risk = risk_result.get("severity", SeverityLevel.LOW)
-    risk_value = risk.value if isinstance(risk, SeverityLevel) else str(risk)
-
-    if hasattr(orchestrator, "run_full_review"):
-        findings, formatted_report = orchestrator.run_full_review(
-            code=code,
-            findings=findings,
-            risk=risk,
-            files=files,
-            file_contents=file_contents,
-            complexity=risk_result.get("complexity"),
-            maintainability=risk_result.get("maintainability"),
-            semantic_findings_count=risk_result.get("semantic_findings_count"),
-        )
-    else:
-        findings = orchestrator.enrich_findings_with_llm(code, findings)
-        settings = get_settings()
-        if settings.ENABLE_DOC_REVIEW:
-            findings.extend(
-                document_service.analyze(
-                    files,
-                    file_contents=file_contents,
-                    enable_llm_review=False,
-                    llm_reviewer=None,
-                )
-            )
-        formatted_report = orchestrator.build_report(
-            findings,
-            risk,
-            complexity=risk_result.get("complexity"),
-            maintainability=risk_result.get("maintainability"),
-            semantic_findings_count=risk_result.get("semantic_findings_count"),
-        )
-        if settings.ENABLE_TRANSLATION:
-            formatted_report = orchestrator.append_translations(formatted_report)
-
-    settings = get_settings()
-    if (
-        settings.ENABLE_GITHUB
-        and github_client is not None
-        and owner
-        and repo_name
-        and pr_number is not None
-    ):
-        try:
-            posted = github_client.upsert_comment(owner, repo_name, pr_number, formatted_report)
-            logger.info(
-                "GitHub comment posted=%s owner=%s repo=%s pr=%s",
-                posted,
-                owner,
-                repo_name,
-                pr_number,
-            )
-        except Exception:
-            logger.exception("GitHub comment posting failed; continuing without crash")
-    else:
-        logger.info("GitHub comment skipped for this webhook request")
-
-    serialized_findings = [
-        {
-            "type": finding.type,
-            "category": finding.category,
-            "owasp_category": finding.owasp_category,
-            "severity": finding.severity.value if isinstance(finding.severity, SeverityLevel) else str(finding.severity),
-            "description": finding.description,
-            "file": finding.file or "unknown",
-            "line": finding.line if finding.line is not None else 1,
-            "recommendation": finding.recommendation,
-            "explanation": finding.explanation,
-            "fix_suggestion": finding.fix_suggestion,
-        }
-        for finding in findings
-    ]
-
-    logger.info(
-        "Synchronous processing completed findings=%s risk=%s",
-        len(serialized_findings),
-        risk_value,
-    )
-    return {
-        "status": "processed",
-        "risk": risk_value,
-        "findings": serialized_findings,
-        "report": formatted_report,
-    }
-
-
-async def _webhook_impl(
-    request: Request,
-    payload: WebhookPayload = Body(
-        ...,
-        examples={
-            "phase2_demo": {
-                "summary": "Synchronous vulnerability classification demo",
-                "value": {
-                    "repo": "demo",
-                    "pr_number": 1,
-                    "author": "user",
-                    "code": "print('hello')",
-                },
-            }
-        },
-    ),
-    orchestrator: AuditOrchestrator = Depends(get_orchestrator),
-    security_service: SecurityService = Depends(get_security_service),
-    risk_engine: RiskEngine = Depends(get_risk_engine),
-    llm_service: LLMService = Depends(get_llm_service),
-    document_service: DocumentService = Depends(get_document_service),
-    github_client: GitHubClient | None = Depends(get_github_client),
-) -> dict[str, Any]:
-    has_explicit_code = isinstance(payload.code, str) and payload.code.strip() != ""
-    has_simple_queue_fields = (
-        payload.repo is not None
-        or payload.pr_number is not None
-        or payload.author is not None
-        or bool(payload.files)
-    )
-    if has_simple_queue_fields and not has_explicit_code:
-        queued_payload: dict[str, Any] = {}
-        if payload.repo is not None:
-            queued_payload["repo"] = payload.repo
-            if "/" in payload.repo:
-                queued_payload["owner"] = payload.repo.split("/", 1)[0]
-        if payload.pr_number is not None:
-            queued_payload["pr_number"] = payload.pr_number
-        if payload.author is not None:
-            queued_payload["author"] = payload.author
-        if payload.files:
-            queued_payload["files"] = payload.files
-        try:
-            await orchestrator.enqueue_pull_request(queued_payload)
-        except Exception:
-            logger.exception("Failed to enqueue webhook payload")
-            raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
-        metrics.counter_inc("sentinel_webhooks_total", {"mode": "queued"})
-        return {"status": "queued"}
-
-    try:
-        raw_payload = await request.json()
-    except Exception:
-        raw_payload = payload.model_dump(exclude_none=True)
-
-    if not isinstance(raw_payload, dict):
-        raw_payload = {}
-
+    job: dict[str, Any] = {}
     repo_name = _extract_repo_name(raw_payload, payload.repo)
     owner = _extract_owner(raw_payload, payload.repo)
     pr_number = _extract_pr_number(raw_payload, payload.pr_number)
     author = _extract_author(raw_payload, payload.author)
-    if owner is None:
-        owner = author
     files = _extract_files(raw_payload, payload.files)
-    file_contents = _extract_file_contents(raw_payload)
 
-    code = payload.code
-    if not isinstance(code, str) or code.strip() == "":
-        raw_code = raw_payload.get("code")
-        code = raw_code if isinstance(raw_code, str) else None
-
-    logger.info(
-        "Received webhook payload for repo=%s pr_number=%s has_code=%s",
-        repo_name,
-        pr_number,
-        bool(code),
-    )
-
-    if code:
-        try:
-            logger.info("Processing webhook synchronously for repo=%s pr_number=%s", repo_name, pr_number)
-            orchestrator.llm_service = llm_service
-            if hasattr(orchestrator, "document_service"):
-                orchestrator.document_service = document_service
-
-            # Offload the blocking pipeline (sklearn + openai + urllib) off the event
-            # loop so a slow LLM/GitHub call doesn't freeze the whole server.
-            return await asyncio.to_thread(
-                _run_sync_review,
-                code=code,
-                risk_engine=risk_engine,
-                orchestrator=orchestrator,
-                document_service=document_service,
-                github_client=github_client,
-                owner=owner,
-                repo_name=repo_name,
-                pr_number=pr_number,
-                files=files,
-                file_contents=file_contents,
-            )
-        except Exception as exc:
-            logger.exception("Synchronous webhook processing failed")
-            return {
-                "status": "error",
-                "message": str(exc),
-            }
-
-    queued_payload = payload.model_dump(exclude_none=True)
-    if not queued_payload:
-        if repo_name is not None:
-            queued_payload["repo"] = repo_name
-        if owner is not None:
-            queued_payload["owner"] = owner
-        if pr_number is not None:
-            queued_payload["pr_number"] = pr_number
-        if author is not None:
-            queued_payload["author"] = author
-        if files:
-            queued_payload["files"] = files
-
-    try:
-        await orchestrator.enqueue_pull_request(queued_payload)
-    except Exception:
-        logger.exception("Failed to enqueue webhook payload")
-        raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
-    metrics.counter_inc("sentinel_webhooks_total", {"mode": "queued"})
-    return {"status": "queued"}
+    if repo_name is not None:
+        job["repo"] = repo_name
+    if owner is not None:
+        job["owner"] = owner
+    if pr_number is not None:
+        job["pr_number"] = pr_number
+    if author is not None:
+        job["author"] = author
+    if files:
+        job["files"] = files
+    return job
 
 
 @router.post("/webhook", dependencies=[Depends(verify_webhook_signature)])
@@ -491,123 +199,51 @@ async def webhook(
     payload: WebhookPayload = Body(
         ...,
         examples={
-            "phase2_demo": {
-                "summary": "Synchronous vulnerability classification demo",
-                "value": {
-                    "repo": "demo",
-                    "pr_number": 1,
-                    "author": "user",
-                    "code": "print('hello')",
-                },
+            "pull_request_opened": {
+                "summary": "Manual trigger for a pull request",
+                "value": {"repo": "octo/hello", "pr_number": 12},
             }
         },
     ),
     orchestrator: AuditOrchestrator = Depends(get_orchestrator),
 ) -> dict[str, Any]:
-    # Event gate: only pull_request deliveries that changed the code get reviewed.
-    # Ahead of dedup so an ignored event never consumes a dedup slot (or a Redis
-    # write). No X-GitHub-Event header -> no filtering, so manual calls behave as
-    # before. Answered 200: GitHub records any non-2xx as a failed delivery.
+    """Accept a delivery and queue a review. Never analyzes caller-supplied code.
+
+    The endpoint identifies a pull request and hands it to the worker, which
+    fetches the real diff from the GitHub API itself. An earlier synchronous
+    mode analyzed a ``code`` field posted in the request body; it was removed
+    because it made a public endpoint an arbitrary-code-analysis service, and
+    real GitHub deliveries never carried that field.
+
+    Order matters: signature (route dependency) -> event filter -> dedup ->
+    enqueue. Filtering ahead of dedup means an ignored event never consumes a
+    dedup slot, and every outcome answers 200 because GitHub records any
+    non-2xx as a failed delivery.
+    """
+    raw_payload = await _raw_json(request)
+
     event = request.headers.get("X-GitHub-Event")
-    allowed, reason = should_process(event, await _raw_json(request) if event else {})
+    allowed, reason = should_process(event, raw_payload)
     if not allowed:
         logger.info("Ignoring webhook delivery (%s)", reason)
         metrics.counter_inc("sentinel_webhooks_total", {"mode": "ignored"})
         return {"status": "ignored", "event": event}
 
-    # Runs after signature verification (the route dependency) and ahead of both
-    # modes: a re-sent delivery is answered 200 without any re-processing.
     delivery_id = request.headers.get("X-GitHub-Delivery")
     if await _deduper.is_duplicate(delivery_id):
         logger.info("Duplicate delivery %s skipped", delivery_id)
         metrics.counter_inc("sentinel_webhooks_total", {"mode": "duplicate"})
         return {"status": "duplicate"}
 
-    has_explicit_code = isinstance(payload.code, str) and payload.code.strip() != ""
-    has_simple_queue_fields = (
-        payload.repo is not None
-        or payload.pr_number is not None
-        or payload.author is not None
-        or bool(payload.files)
+    job = _build_job(raw_payload, payload)
+    logger.info(
+        "Queueing review for repo=%s pr_number=%s", job.get("repo"), job.get("pr_number")
     )
-
-    if has_simple_queue_fields and not has_explicit_code:
-        queued_payload: dict[str, Any] = {}
-        if payload.repo is not None:
-            queued_payload["repo"] = payload.repo
-            if "/" in payload.repo:
-                queued_payload["owner"] = payload.repo.split("/", 1)[0]
-        if payload.pr_number is not None:
-            queued_payload["pr_number"] = payload.pr_number
-        if payload.author is not None:
-            queued_payload["author"] = payload.author
-        if payload.files:
-            queued_payload["files"] = payload.files
-        try:
-            await orchestrator.enqueue_pull_request(queued_payload)
-        except Exception:
-            logger.exception("Failed to enqueue webhook payload")
-            raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
-        metrics.counter_inc("sentinel_webhooks_total", {"mode": "queued"})
-        return {"status": "queued"}
-
     try:
-        raw_payload = await request.json()
+        await orchestrator.enqueue_pull_request(job)
     except Exception:
-        raw_payload = payload.model_dump(exclude_none=True)
+        logger.exception("Failed to enqueue webhook payload")
+        raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
 
-    if not isinstance(raw_payload, dict):
-        raw_payload = {}
-
-    code = payload.code
-    if not isinstance(code, str) or code.strip() == "":
-        raw_code = raw_payload.get("code")
-        code = raw_code if isinstance(raw_code, str) else None
-
-    if not code:
-        repo_name = _extract_repo_name(raw_payload, payload.repo)
-        pr_number = _extract_pr_number(raw_payload, payload.pr_number)
-        author = _extract_author(raw_payload, payload.author)
-        files = _extract_files(raw_payload, payload.files)
-        owner = _extract_owner(raw_payload, payload.repo)
-
-        queued_payload = payload.model_dump(exclude_none=True)
-        if not queued_payload:
-            if repo_name is not None:
-                queued_payload["repo"] = repo_name
-            if owner is not None:
-                queued_payload["owner"] = owner
-            if pr_number is not None:
-                queued_payload["pr_number"] = pr_number
-            if author is not None:
-                queued_payload["author"] = author
-            if files:
-                queued_payload["files"] = files
-
-        try:
-            await orchestrator.enqueue_pull_request(queued_payload)
-        except Exception:
-            logger.exception("Failed to enqueue webhook payload")
-            raise HTTPException(status_code=500, detail="Failed to queue webhook payload")
-        metrics.counter_inc("sentinel_webhooks_total", {"mode": "queued"})
-        return {"status": "queued"}
-
-    security_service = _resolve_override(request, get_security_service)
-    risk_engine = _resolve_override(request, get_risk_engine)
-    llm_service = _resolve_override(request, get_llm_service)
-    document_service = _resolve_override(request, get_document_service)
-    github_client = _resolve_override(request, get_github_client)
-
-    result = await _webhook_impl(
-        request,
-        payload,
-        orchestrator,
-        security_service,
-        risk_engine,
-        llm_service,
-        document_service,
-        github_client,
-    )
-    if isinstance(result, dict) and result.get("status") == "processed":
-        metrics.counter_inc("sentinel_webhooks_total", {"mode": "sync"})
-    return result
+    metrics.counter_inc("sentinel_webhooks_total", {"mode": "queued"})
+    return {"status": "queued"}

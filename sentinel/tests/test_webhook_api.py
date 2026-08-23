@@ -113,8 +113,14 @@ def test_webhook_missing_content_type_header_is_handled():
     assert response.status_code in {200, 422}
 
 
-def test_webhook_large_payload_1mb_no_crash():
-    client, _ = _build_client()
-    large_repo = "r" * (1024 * 1024)
-    response = client.post("/webhook", json={"repo": large_repo, "pr_number": 1})
-    assert response.status_code == 200
+def test_webhook_absurd_repo_name_is_rejected_cleanly():
+    """A 1MB repo name is garbage; reject it at validation, don't crash or queue it.
+
+    The field cap was 1MB when `repo` was one of several ways in. Now that it is
+    the primary identifier it is capped at 1024 — still far above GitHub's own
+    100-char limit, and a graceful 422 rather than a queued job.
+    """
+    client, orchestrator = _build_client()
+    response = client.post("/webhook", json={"repo": "r" * (1024 * 1024), "pr_number": 1})
+    assert response.status_code == 422
+    assert orchestrator.received == []

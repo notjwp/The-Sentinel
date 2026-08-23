@@ -158,9 +158,9 @@ def test_ping_event_is_ignored(monkeypatch):
     assert orchestrator.received == []
 
 
-def test_sync_mode_still_runs_for_a_reviewable_event(monkeypatch):
-    """The event gate sits ahead of the mode branch — it must not break sync mode."""
-    client, _ = _build_client(monkeypatch)
+def test_a_code_field_does_not_bypass_the_event_gate(monkeypatch):
+    """The gate sits ahead of everything; a `code` field is just ignored data."""
+    client, orchestrator = _build_client(monkeypatch)
 
     response = client.post(
         "/webhook",
@@ -169,7 +169,8 @@ def test_sync_mode_still_runs_for_a_reviewable_event(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "processed"
+    assert response.json() == {"status": "queued"}
+    assert "code" not in orchestrator.received[0]
 
 
 def test_ignored_delivery_is_counted_and_does_not_consume_a_dedup_slot(monkeypatch):

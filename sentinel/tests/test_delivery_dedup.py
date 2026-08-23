@@ -127,18 +127,3 @@ def test_requests_without_delivery_header_are_never_deduped(monkeypatch):
         assert response.json() == {"status": "queued"}
 
     assert len(orchestrator.received) == 2
-
-
-def test_sync_mode_duplicate_delivery_skips_reprocessing(monkeypatch):
-    client, orchestrator = _build_client(monkeypatch)
-    payload = {"repo": "demo", "pr_number": 1, "code": "print('hello')"}
-    headers = {"X-GitHub-Delivery": "guid-sync"}
-
-    first = client.post("/webhook", json=payload, headers=headers)
-    second = client.post("/webhook", json=payload, headers=headers)
-
-    assert first.status_code == 200
-    assert first.json()["status"] == "processed"
-    assert second.status_code == 200
-    assert second.json() == {"status": "duplicate"}
-    assert orchestrator.sync_reviews == 1

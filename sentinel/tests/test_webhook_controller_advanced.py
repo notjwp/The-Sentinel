@@ -1,159 +1,38 @@
+"""Webhook route behavior: queueing, validation, and enqueue failure.
+
+The synchronous ``code``-in-body mode was removed in M9 — the endpoint no longer
+analyzes caller-supplied source, it only identifies a pull request and queues it.
+The tests that drove that mode went with it; what remains covers the single path.
+"""
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from sentinel.api.webhook_controller import get_llm_service, get_orchestrator, get_risk_engine, get_security_service
+from sentinel.api.webhook_controller import get_orchestrator
 from sentinel.api.webhook_controller import router as webhook_router
-from sentinel.domain.entities.finding import Finding
-from sentinel.domain.value_objects.severity_level import SeverityLevel
 
 
 class _DummyOrchestrator:
     def __init__(self) -> None:
         self.enqueued: list[dict] = []
-        self.llm_service = None
         self.raise_on_enqueue = False
-        self.raise_on_enrich = False
 
     async def enqueue_pull_request(self, payload: dict) -> None:
         if self.raise_on_enqueue:
-            raise RuntimeError("queue failure")
+            raise RuntimeError("queue is down")
         self.enqueued.append(payload)
 
-    def enrich_findings_with_llm(self, code: str, findings: list[Finding]) -> list[Finding]:
-        if self.raise_on_enrich:
-            raise RuntimeError("enrich failure")
-        return findings
 
-    def build_report(
-        self,
-        findings: list[Finding],
-        risk: SeverityLevel | str,
-        *,
-        complexity: int | None = None,
-        maintainability: float | None = None,
-        semantic_findings_count: int | None = None,
-    ) -> str:
-        return "report from dummy orchestrator"
-
-    def append_translations(self, report: str, languages: list[str] | None = None) -> str:
-        return report
-
-
-class _DummySecurityService:
-    def __init__(self, findings: list[Finding] | None = None, should_raise: bool = False) -> None:
-        self.findings = findings or []
-        self.should_raise = should_raise
-
-    def analyze(self, code: str) -> dict:
-        if self.should_raise:
-            raise RuntimeError("security failure")
-        return {
-            "findings": self.findings,
-            "severity": SeverityLevel.HIGH if self.findings else SeverityLevel.LOW,
-        }
-
-
-class _DummyRiskEngine:
-    def __init__(
-        self,
-        severity: SeverityLevel = SeverityLevel.HIGH,
-        should_raise: bool = False,
-        findings: list[Finding] | None = None,
-    ) -> None:
-        self.severity = severity
-        self.should_raise = should_raise
-        self.findings = findings or []
-
-    def assess(self, code: str) -> dict:
-        if self.should_raise:
-            raise RuntimeError("risk failure")
-        return {
-            "severity": self.severity,
-            "complexity": 1,
-            "maintainability": 100.0,
-            "security_findings_count": len(self.findings),
-            "security": {
-                "findings": self.findings,
-                "severity": self.severity,
-            },
-            "semantic_findings_count": 0,
-            "semantic": {"findings": [], "severity": SeverityLevel.LOW},
-        }
-
-
-class _DummyLLMService:
-    pass
-
-
-def _build_client(
-    orchestrator: _DummyOrchestrator,
-    security_service: _DummySecurityService,
-    risk_engine: _DummyRiskEngine,
-    llm_service: _DummyLLMService,
-) -> TestClient:
+def _build_client(orchestrator: _DummyOrchestrator) -> TestClient:
     app = FastAPI(title="Webhook Advanced Test")
     app.dependency_overrides[get_orchestrator] = lambda: orchestrator
-    app.dependency_overrides[get_security_service] = lambda: security_service
-    app.dependency_overrides[get_risk_engine] = lambda: risk_engine
-    app.dependency_overrides[get_llm_service] = lambda: llm_service
     app.include_router(webhook_router)
     return TestClient(app)
 
 
-def test_webhook_synchronous_mode_serializes_findings():
-    finding = Finding(
-        rule="sql_injection",
-        match="SELECT",
-        severity=SeverityLevel.HIGH,
-        category="Injection",
-        owasp_category="A03: Injection",
-        description="SQL injection detected",
-        file=None,
-        line=None,
-        recommendation="Use parameterized queries",
-        explanation="Untrusted input can alter query semantics.",
-        fix_suggestion="cursor.execute(query, (user_input,))",
-    )
+def test_webhook_queues_the_identified_pull_request():
     orchestrator = _DummyOrchestrator()
-    client = _build_client(
-        orchestrator=orchestrator,
-        security_service=_DummySecurityService(findings=[finding]),
-        risk_engine=_DummyRiskEngine(severity=SeverityLevel.HIGH, findings=[finding]),
-        llm_service=_DummyLLMService(),
-    )
-
-    response = client.post(
-        "/webhook",
-        json={"repo": "demo", "pr_number": 1, "author": "u", "code": "x = 1"},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "processed"
-    assert body["risk"] == "HIGH"
-    assert len(body["findings"]) == 1
-    rendered = body["findings"][0]
-    assert rendered["type"] == "security"
-    assert rendered["category"] == "Injection"
-    assert rendered["owasp_category"] == "A03: Injection"
-    assert rendered["severity"] == "HIGH"
-    assert rendered["description"] == "SQL injection detected"
-    assert rendered["file"] == "unknown"
-    assert rendered["line"] == 1
-    assert rendered["recommendation"] == "Use parameterized queries"
-    assert rendered["explanation"]
-    assert rendered["fix_suggestion"]
-    assert orchestrator.llm_service is not None
-
-
-def test_webhook_async_mode_queues_when_code_absent():
-    orchestrator = _DummyOrchestrator()
-    client = _build_client(
-        orchestrator=orchestrator,
-        security_service=_DummySecurityService(),
-        risk_engine=_DummyRiskEngine(),
-        llm_service=_DummyLLMService(),
-    )
+    client = _build_client(orchestrator)
 
     response = client.post("/webhook", json={"repo": "demo", "pr_number": 2, "author": "alice"})
 
@@ -162,46 +41,48 @@ def test_webhook_async_mode_queues_when_code_absent():
     assert orchestrator.enqueued == [{"repo": "demo", "pr_number": 2, "author": "alice"}]
 
 
-def test_webhook_invalid_body_returns_422():
+def test_webhook_ignores_a_code_field_instead_of_analyzing_it():
+    """M9 regression guard: posting source must not get it analyzed.
+
+    ``code`` used to switch the endpoint into a synchronous mode that ran the
+    engines over whatever the caller sent. It is now dropped by the payload
+    model, and the request queues a review of the identified PR like any other.
+    """
     orchestrator = _DummyOrchestrator()
-    client = _build_client(
-        orchestrator=orchestrator,
-        security_service=_DummySecurityService(),
-        risk_engine=_DummyRiskEngine(),
-        llm_service=_DummyLLMService(),
+    client = _build_client(orchestrator)
+
+    response = client.post(
+        "/webhook",
+        json={"repo": "demo", "pr_number": 3, "code": "password = 'hunter2'"},
     )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "queued"}
+    assert orchestrator.enqueued == [{"repo": "demo", "pr_number": 3}]
+    assert "code" not in orchestrator.enqueued[0]
+
+
+def test_webhook_owner_is_split_from_a_full_name_repo():
+    orchestrator = _DummyOrchestrator()
+    client = _build_client(orchestrator)
+
+    client.post("/webhook", json={"repo": "octo/hello", "pr_number": 7})
+
+    assert orchestrator.enqueued == [{"repo": "octo/hello", "owner": "octo", "pr_number": 7}]
+
+
+def test_webhook_invalid_body_returns_422():
+    client = _build_client(_DummyOrchestrator())
 
     response = client.post("/webhook", json=["bad", "payload"])
 
     assert response.status_code == 422
 
 
-def test_webhook_synchronous_processing_exception_returns_error_status():
-    orchestrator = _DummyOrchestrator()
-    client = _build_client(
-        orchestrator=orchestrator,
-        security_service=_DummySecurityService(),
-        risk_engine=_DummyRiskEngine(should_raise=True),
-        llm_service=_DummyLLMService(),
-    )
-
-    response = client.post("/webhook", json={"repo": "demo", "pr_number": 3, "code": "x"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "error"
-    assert "risk failure" in body["message"]
-
-
 def test_webhook_queue_exception_returns_500_http_error():
     orchestrator = _DummyOrchestrator()
     orchestrator.raise_on_enqueue = True
-    client = _build_client(
-        orchestrator=orchestrator,
-        security_service=_DummySecurityService(),
-        risk_engine=_DummyRiskEngine(),
-        llm_service=_DummyLLMService(),
-    )
+    client = _build_client(orchestrator)
 
     response = client.post("/webhook", json={"repo": "demo", "pr_number": 4})
 

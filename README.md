@@ -34,9 +34,9 @@ API (FastAPI) → Application (Orchestration) → Domain (Pure Logic) ← Infras
 `AuditOrchestrator` layers on LLM enrichment, documentation findings, markdown report
 building, check-run payloads, and optional translation.
 
-### Request Pipeline — the webhook has two modes
+### Request Pipeline
 
-`POST /webhook` branches on payload contents. Requests are verified against
+`POST /webhook` identifies a pull request and queues a review of it. It never analyzes code posted in the request body — the worker fetches the real diff from GitHub itself. Requests are verified against
 `X-Hub-Signature-256` when `GITHUB_WEBHOOK_SECRET` is set, and re-sent deliveries are
 deduplicated by `X-GitHub-Delivery` (HTTP 200 `{"status": "duplicate"}`, no re-processing).
 
@@ -56,8 +56,9 @@ with no `X-GitHub-Event` header is never filtered (local `curl`, manual replays)
    at the head commit (patch hunk arithmetic). If the PR fetch itself fails, no comment is
    posted and the check run is `neutral` ("Review skipped") — a GitHub outage never reads as
    a clean PR.
-2. **Synchronous mode** — payload has `code`. Runs the same review inline and returns
-   findings plus a markdown report in the HTTP response.
+A synchronous mode that analyzed a `code` field posted in the body was removed in M9:
+it turned a public endpoint into an arbitrary-code-analysis service, and real GitHub
+deliveries never used it.
 
 Both paths post comments via `GitHubClient.upsert_comment`, which tags the comment with a
 hidden marker and **updates Sentinel's existing review in place** on re-runs instead of
@@ -97,7 +98,7 @@ sentinel/
 ├── api/
 │   ├── health_controller.py                # GET /health
 │   ├── metrics_controller.py               # GET /metrics (Prometheus text format)
-│   ├── webhook_controller.py               # POST /webhook (queued + synchronous modes)
+│   ├── webhook_controller.py               # POST /webhook (signature -> filter -> dedup -> queue)
 │   ├── webhook_security.py                 # X-Hub-Signature-256 verification (route dependency)
 │   └── delivery_dedup.py                   # In-memory X-GitHub-Delivery dedup (Redis variant in infra)
 ├── application/
@@ -202,7 +203,7 @@ docker compose up --build
 | `GET` | `/` | Root health message |
 | `GET` | `/health` | Health status |
 | `GET` | `/metrics` | Prometheus-format metrics (counters, durations, live queue depth). Requires `Authorization: Bearer $METRICS_TOKEN` when that is set; open otherwise |
-| `POST` | `/webhook` | Receives PR events for auditing (queued or synchronous) |
+| `POST` | `/webhook` | Receives PR events and queues a review |
 
 ## Test
 
