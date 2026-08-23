@@ -181,22 +181,49 @@ class BackgroundWorker:
         return owner, repo_name, job.get("pr_number")
 
     @staticmethod
-    def _fetch_pr_data(job: dict, github_client: GitHubClient | None) -> None:
+    def _fetch_refs(job: dict, github_client: GitHubClient, owner, repo_name, pr_number) -> None:
+        """Stash the PR's head/base SHAs on the job. Best-effort, never raises.
+
+        Runs BEFORE the file fetch: ``head_sha`` is what a check run attaches to,
+        so it has to be available even when the file fetch is what failed.
+        """
+        try:
+            refs = github_client.get_pull_request_refs(owner, repo_name, pr_number)
+        except Exception:
+            logger.exception("Failed to fetch PR refs for repo=%s pr=%s", repo_name, pr_number)
+            return
+        head_sha = refs.get("head_sha")
+        if head_sha:
+            job["head_sha"] = head_sha  # check runs attach to the head commit
+        base_sha = refs.get("base_sha")
+        if base_sha:
+            job["base_sha"] = base_sha
+
+    @staticmethod
+    def _fetch_pr_data(job: dict, github_client: GitHubClient | None) -> bool:
         """Populate ``job['code']``/``files``/``file_contents`` from the PR. Failure-safe.
+
+        Returns whether the review may proceed on trustworthy input: ``False``
+        ONLY when a fetch that should have happened raised. "Nothing to fetch"
+        (no client, code already on the job, owner-less job) is not a failure —
+        neither is a failed corpus build, which stays best-effort.
 
         Fetched data wins over payload-supplied values when non-empty; payload values
         are kept otherwise.
         """
         if github_client is None or job.get("code"):
-            return
+            return True
         owner, repo_name, pr_number = BackgroundWorker._identity(job)
         if not owner or not repo_name or pr_number is None:
-            return
+            return True
+
+        BackgroundWorker._fetch_refs(job, github_client, owner, repo_name, pr_number)
+
         try:
             fetched = github_client.get_pull_request_data(owner, repo_name, pr_number)
         except Exception:
             logger.exception("Failed to fetch PR data for repo=%s pr=%s", repo_name, pr_number)
-            return
+            return False
 
         code = fetched.get("code")
         if isinstance(code, str) and code.strip():
@@ -221,14 +248,10 @@ class BackgroundWorker:
 
         # Build the semantic corpus from the base branch (what the PR lands on),
         # chunked into top-level units. Best-effort: on any failure the job keeps
-        # no corpus and _assess falls back to the static list.
-        try:
-            refs = github_client.get_pull_request_refs(owner, repo_name, pr_number)
-            head_sha = refs.get("head_sha")
-            if head_sha:
-                job["head_sha"] = head_sha  # check runs attach to the head commit
-            base_sha = refs.get("base_sha")
-            if base_sha:
+        # no corpus and _assess skips duplicate detection entirely.
+        base_sha = job.get("base_sha")
+        if base_sha:
+            try:
                 corpus_files = github_client.get_repo_code_corpus(owner, repo_name, base_sha)
                 chunks = [
                     chunk
@@ -244,10 +267,12 @@ class BackgroundWorker:
                         repo_name,
                         pr_number,
                     )
-        except Exception:
-            logger.exception(
-                "Semantic corpus build failed for repo=%s pr=%s", repo_name, pr_number
-            )
+            except Exception:
+                logger.exception(
+                    "Semantic corpus build failed for repo=%s pr=%s", repo_name, pr_number
+                )
+
+        return True
 
     @staticmethod
     def _post_review(
@@ -318,6 +343,48 @@ class BackgroundWorker:
         except Exception:
             logger.exception("Failed to post PR review for repo=%s pr=%s", repo_name, pr_number)
 
+    @staticmethod
+    def _post_fetch_failure(job: dict, github_client: GitHubClient | None) -> None:
+        """Report that the review was skipped, rather than leaving the PR looking clean.
+
+        A neutral check run: visible in the merge box so nobody reads silence as a
+        pass, but never blocking a merge on Sentinel's own outage. No comment —
+        a broad GitHub failure would otherwise write one on every open PR.
+        Failure-safe, like every other GitHub edge.
+        """
+        if github_client is None:
+            return
+        owner, repo_name, pr_number = BackgroundWorker._identity(job)
+        head_sha = job.get("head_sha")
+        if not owner or not repo_name or pr_number is None or not head_sha:
+            return
+        if not get_settings().ENABLE_CHECKS:
+            return
+        try:
+            posted = github_client.create_check_run(
+                owner,
+                repo_name,
+                head_sha,
+                conclusion="neutral",
+                title="Review skipped",
+                summary=(
+                    "Sentinel could not fetch this pull request's contents from the "
+                    "GitHub API. No review was performed."
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to post skipped-review check for repo=%s pr=%s", repo_name, pr_number
+            )
+            return
+        metrics.counter_inc(
+            "sentinel_github_posts_total",
+            {"kind": "check_run", "outcome": "skipped" if posted else "failed"},
+        )
+        logger.info(
+            "Worker posted skipped-review check=%s repo=%s pr=%s", posted, repo_name, pr_number
+        )
+
     def _process_one(
         self,
         job: dict,
@@ -332,7 +399,19 @@ class BackgroundWorker:
         """
         start_time = time.monotonic()
 
-        self._fetch_pr_data(job, github_client)
+        # A failed fetch must never look like a clean PR: assessing the empty
+        # code we did not manage to fetch would report "no issues" and a passing
+        # check run. Say nothing about the code; say the review was skipped.
+        if not self._fetch_pr_data(job, github_client):
+            pr_number = job.get("pr_number")
+            skipped_line = f"PR #{pr_number} Risk: SKIPPED (fetch failed)"
+            metrics.counter_inc("sentinel_reviews_skipped_total", {"reason": "fetch_failed"})
+            logger.warning("%s", skipped_line)
+            sys.stdout.write(f"{skipped_line}\n")
+            sys.stdout.flush()
+            self._post_fetch_failure(job, github_client)
+            metrics.observe("sentinel_job_duration_seconds", time.monotonic() - start_time)
+            return
 
         pull_request, assessment = self._assess(job, risk_engine)
         risk = assessment["severity"]

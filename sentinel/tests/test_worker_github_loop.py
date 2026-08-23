@@ -420,3 +420,115 @@ def test_assess_still_detects_duplicates_against_a_real_corpus():
 
     assert assessment["semantic_findings_count"] == 1
     assert assessment["severity"] == SeverityLevel.HIGH
+
+
+class _FailingGitHub(_FakeGitHub):
+    """A client whose PR-file fetch is down; refs (and so head_sha) still work."""
+
+    def get_pull_request_data(self, owner: str, repo: str, pr_number) -> dict:
+        raise RuntimeError("GitHub API unavailable")
+
+
+def _drive_until(worker: BackgroundWorker, predicate) -> None:
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_: float) -> None:
+        await real_sleep(0)
+
+    async def _run() -> None:
+        original_sleep = bw_module.asyncio.sleep
+        bw_module.asyncio.sleep = fast_sleep
+
+        task = asyncio.create_task(worker.start())
+        for _ in range(500):
+            if predicate():
+                break
+            await real_sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        bw_module.asyncio.sleep = original_sleep
+
+    asyncio.run(_run())
+
+
+def test_failed_fetch_posts_a_neutral_check_and_no_review(monkeypatch, capsys):
+    """M8: a GitHub outage must not read as a clean PR.
+
+    Before this, the worker assessed the empty code it failed to fetch and
+    posted 'No security issues detected' plus a passing check run.
+    """
+    from sentinel.monitoring.metrics import metrics
+
+    metrics.reset()
+    fake = _FailingGitHub("never returned")
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
+
+    async def _seed(queue: JobQueue) -> None:
+        await queue.enqueue({"owner": "octo", "repo": "hello", "pr_number": 20})
+
+    queue = JobQueue()
+    asyncio.run(_seed(queue))
+    worker = BackgroundWorker(queue)
+
+    _drive_until(worker, lambda: worker.processed_count >= 1)
+
+    # No review comment at all — a broad outage must not comment on every PR.
+    assert fake.posted == []
+
+    # One neutral check run, carrying the head SHA the refs call stashed BEFORE
+    # the files call failed.
+    assert len(fake.check_runs) == 1
+    run = fake.check_runs[0]
+    assert run["conclusion"] == "neutral"  # visible, but never blocks a merge
+    assert run["head_sha"] == "head-sha"
+    assert run["title"] == "Review skipped"
+    assert "could not fetch" in run["summary"]
+
+    counters = metrics.snapshot()["counters"]
+    assert counters['sentinel_reviews_skipped_total{reason="fetch_failed"}'] == 1
+    assert counters['sentinel_github_posts_total{kind="check_run",outcome="skipped"}'] == 1
+    # Crucially: no review was recorded at any severity.
+    assert not any(key.startswith("sentinel_reviews_total") for key in counters)
+
+    assert "PR #20 Risk: SKIPPED (fetch failed)" in capsys.readouterr().out
+
+
+def test_docs_only_pr_is_still_reviewed(monkeypatch, capsys):
+    """Empty code is NOT a fetch failure: a docs-only PR still gets a full review."""
+    from sentinel.monitoring.metrics import metrics
+
+    metrics.reset()
+    fake = _FakeGitHub(
+        "",  # no added code lines at all — only a markdown file changed
+        files=["README.md"],
+        file_contents={"README.md": "notes only"},
+    )
+    monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
+    monkeypatch.setattr(bw_module, "_build_llm_service", lambda settings: _FakeLLM())
+
+    async def _seed(queue: JobQueue) -> None:
+        await queue.enqueue({"owner": "octo", "repo": "hello", "pr_number": 21})
+
+    queue = JobQueue()
+    asyncio.run(_seed(queue))
+    worker = BackgroundWorker(queue)
+
+    _drive_one_job(worker, queue, fake)
+
+    assert len(fake.posted) == 1
+    body = fake.posted[0][3]
+    assert "## Documentation Issues" in body
+
+    assert len(fake.check_runs) == 1
+    assert fake.check_runs[0]["conclusion"] == "success"  # a real result, not "skipped"
+
+    counters = metrics.snapshot()["counters"]
+    assert counters['sentinel_reviews_total{severity="LOW"}'] == 1
+    assert not any(key.startswith("sentinel_reviews_skipped_total") for key in counters)
+
+    assert "PR #21 Risk: LOW" in capsys.readouterr().out
