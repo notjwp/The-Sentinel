@@ -232,3 +232,89 @@ def test_worker_blocks_on_empty_queue_and_resumes():
         assert queue._queue.qsize() == 0
 
     asyncio.run(_run())
+
+
+# --- Loop Pacing (M8) ---
+
+
+def test_backlog_drains_without_a_per_job_delay():
+    """Jobs must process back-to-back, not one every ERROR_BACKOFF_SECONDS.
+
+    Deliberately does NOT patch asyncio.sleep — the point is to measure real
+    wall clock. The old loop slept 2s after every job, so reaching five
+    processed jobs took at least four sleeps (~8s); this budget cannot be met
+    unless the success path is sleep-free.
+    """
+    import time
+
+    async def _run() -> float:
+        queue = JobQueue()
+        worker = BackgroundWorker(queue)
+        for i in range(5):
+            await queue.enqueue({"repo": "drain", "pr_number": i})
+
+        started = time.monotonic()
+        task = asyncio.create_task(worker.start())
+        for _ in range(500):
+            if worker.processed_count >= 5:
+                break
+            await asyncio.sleep(0.01)
+        elapsed = time.monotonic() - started
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert worker.processed_count >= 5
+        return elapsed
+
+    assert asyncio.run(_run()) < 3.0
+
+
+def test_only_the_error_path_backs_off():
+    """One failed dequeue sleeps once; the job that follows sleeps not at all."""
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        await real_sleep(0)
+
+    class _FlakyQueue(JobQueue):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dequeue_calls = 0
+
+        async def dequeue(self) -> dict:
+            self.dequeue_calls += 1
+            if self.dequeue_calls == 1:
+                raise RuntimeError("queue backend unreachable")
+            return await super().dequeue()
+
+    async def _run() -> None:
+        queue = _FlakyQueue()
+        worker = BackgroundWorker(queue)
+        await queue.enqueue({"repo": "flaky", "pr_number": 1})
+
+        original_sleep = bw_module.asyncio.sleep
+        bw_module.asyncio.sleep = recording_sleep
+
+        task = asyncio.create_task(worker.start())
+        for _ in range(500):
+            if worker.processed_count >= 1:
+                break
+            await real_sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        bw_module.asyncio.sleep = original_sleep
+
+        assert worker.processed_count == 1
+        assert slept == [BackgroundWorker.ERROR_BACKOFF_SECONDS]
+
+    asyncio.run(_run())

@@ -75,6 +75,12 @@ def _safe_assessment() -> dict:
 
 
 class BackgroundWorker:
+    # Pause after a failed loop iteration. Only the error path is paced: both
+    # queues already block or poll inside dequeue(), so a delay on the success
+    # path is pure idle time between jobs. This exists solely to stop a tight
+    # spin when dequeue() itself keeps raising (e.g. Redis unreachable).
+    ERROR_BACKOFF_SECONDS = 2.0
+
     def __init__(self, queue: JobQueue) -> None:
         self.queue = queue
         # Count of jobs whose processing has fully completed. Deterministic completion
@@ -467,4 +473,4 @@ class BackgroundWorker:
                 metrics.counter_inc("sentinel_jobs_processed_total")
             except Exception:
                 logger.exception("Worker failed to process job; continuing")
-            await asyncio.sleep(2)
+                await asyncio.sleep(self.ERROR_BACKOFF_SECONDS)
