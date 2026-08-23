@@ -121,6 +121,13 @@ def _drive_one_job(worker: BackgroundWorker, queue: JobQueue, fake: _FakeGitHub)
 
 
 def test_worker_fetches_pr_code_and_posts_structured_review(monkeypatch, capsys):
+    # This test asserts the enrichment marker reaches the report, and
+    # enrich_findings_with_llm gates on ENABLE_LLM — so the flag has to be on for
+    # the assertion to mean anything. CI sets ENABLE_LLM=false globally, which is
+    # why this needs to be explicit rather than inherited from the environment.
+    # No network: _build_llm_service is replaced with a fake below.
+    monkeypatch.setenv("ENABLE_LLM", "true")
+
     # Vulnerable code the worker will only ever see by fetching it from GitHub.
     fake = _FakeGitHub('password = "hunter2"\napi_key = "sk-abcdefghijklmnopqrst"')
     monkeypatch.setattr(bw_module, "_build_github_client", lambda settings: fake)
