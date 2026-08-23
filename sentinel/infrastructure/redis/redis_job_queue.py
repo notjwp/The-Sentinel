@@ -10,6 +10,10 @@ message to a processing list, ``ack`` removes it after the job completes, and
 ``recover_pending`` (run at worker start) re-queues anything a crashed worker
 left behind. A re-run after a crash is safe — the review post is an idempotent
 upsert and assessment is deterministic.
+
+Retries are **bounded**: each recovery bumps the envelope's attempt count, and a
+job that burns ``MAX_ATTEMPTS`` is parked on ``DEAD_KEY`` rather than re-queued,
+so a job that reliably kills the worker cannot be resurrected forever.
 """
 
 import asyncio
@@ -29,6 +33,11 @@ logger = get_logger(__name__)
 class RedisJobQueue:
     QUEUE_KEY = "sentinel:jobs"
     PROCESSING_KEY = "sentinel:jobs:processing"
+    # Jobs that exhausted their retries. Recovery is what makes a crash safe, but
+    # unbounded recovery makes a poison job immortal: one that kills the process
+    # would be re-queued at every start, forever. Parked here instead, for a human.
+    DEAD_KEY = "sentinel:jobs:dead"
+    MAX_ATTEMPTS = 3
     # Outage hygiene: one traceback per failing streak, then at most one summary
     # line per suppress window; retry sleeps back off exponentially to the cap.
     LOG_SUPPRESS_SECONDS = 60.0
@@ -59,8 +68,10 @@ class RedisJobQueue:
         if not isinstance(job, dict):
             raise TypeError("job must be a dictionary")
         # Envelope gives every message a distinct identity, so LREM on ack can
-        # never remove a different-but-identical job payload.
-        raw = json.dumps({"id": uuid.uuid4().hex, "job": job})
+        # never remove a different-but-identical job payload. ``attempts`` lives
+        # on the envelope, never inside ``job`` — the dict handed to the worker
+        # must stay exactly what the producer enqueued.
+        raw = json.dumps({"id": uuid.uuid4().hex, "attempts": 0, "job": job})
         # Redis errors propagate: the webhook route turns enqueue failures into
         # HTTP 500, and GitHub redelivers later.
         await self._client.lpush(self.QUEUE_KEY, raw)
@@ -134,22 +145,55 @@ class RedisJobQueue:
             logger.exception("Redis ack failed; job will be re-queued on next restart")
 
     async def recover_pending(self) -> int:
-        """Re-queue jobs a crashed worker left in the processing list."""
+        """Re-queue jobs a crashed worker left in the processing list.
+
+        Each recovery bumps the envelope's ``attempts``; a job that has burned
+        MAX_ATTEMPTS is moved to DEAD_KEY instead of being re-queued, so a job
+        that reliably kills the worker stops taking the process down with it.
+        Returns the number **re-queued** (interface parity with the in-memory
+        queue's no-op); dead-lettered jobs are logged and counted separately.
+        """
         recovered = 0
+        dead_lettered = 0
         while True:
             try:
+                # LMOVE first, exactly as before: the message is never in flight
+                # between two keys. Rewriting it afterwards means a crash mid-
+                # recovery leaves the job queued with a stale attempt count —
+                # one extra retry at worst, never a lost job.
                 raw = await self._client.lmove(
                     self.PROCESSING_KEY, self.QUEUE_KEY, "RIGHT", "LEFT"
                 )
+                if raw is None:
+                    break
+                envelope = self._parse_envelope(raw)
+                if envelope is None:
+                    await self._client.lrem(self.QUEUE_KEY, 1, raw)  # poison, drop it
+                    continue
+                attempts = envelope.get("attempts")
+                envelope["attempts"] = (attempts if isinstance(attempts, int) else 0) + 1
+                if envelope["attempts"] >= self.MAX_ATTEMPTS:
+                    await self._client.lrem(self.QUEUE_KEY, 1, raw)
+                    await self._client.lpush(self.DEAD_KEY, json.dumps(envelope))
+                    dead_lettered += 1
+                    metrics.counter_inc("sentinel_jobs_deadlettered_total")
+                    continue
+                await self._client.lrem(self.QUEUE_KEY, 1, raw)
+                await self._client.lpush(self.QUEUE_KEY, json.dumps(envelope))
+                recovered += 1
             except Exception:
                 metrics.counter_inc("sentinel_redis_errors_total", {"op": "recover"})
                 logger.exception("Redis recovery failed; continuing with %s recovered", recovered)
                 break
-            if raw is None:
-                break
-            recovered += 1
         if recovered:
             logger.info("Recovered %s orphaned job(s) from the processing list", recovered)
+        if dead_lettered:
+            logger.error(
+                "Dead-lettered %s job(s) after %s attempts; inspect %s",
+                dead_lettered,
+                self.MAX_ATTEMPTS,
+                self.DEAD_KEY,
+            )
         return recovered
 
     async def depth(self) -> int:
@@ -160,18 +204,23 @@ class RedisJobQueue:
             return -1
 
     @staticmethod
-    def _parse_job(raw: str) -> dict | None:
-        """Extract the job dict from an envelope string; None if malformed."""
+    def _parse_envelope(raw: str) -> dict | None:
+        """Parse a queue message into its envelope dict; None if malformed."""
         try:
             envelope = json.loads(raw)
         except Exception:
             logger.warning("Discarding unparseable queue message")
             return None
-        job = envelope.get("job") if isinstance(envelope, dict) else None
-        if not isinstance(job, dict):
+        if not isinstance(envelope, dict) or not isinstance(envelope.get("job"), dict):
             logger.warning("Discarding queue message without a job dict")
             return None
-        return job
+        return envelope
+
+    @staticmethod
+    def _parse_job(raw: str) -> dict | None:
+        """Extract the job dict from an envelope string; None if malformed."""
+        envelope = RedisJobQueue._parse_envelope(raw)
+        return envelope["job"] if envelope is not None else None
 
     async def _discard_processing(self, raw: str) -> None:
         try:

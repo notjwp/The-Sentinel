@@ -248,3 +248,97 @@ def test_poison_messages_are_discarded_and_valid_job_still_served():
         assert await client.llen(RedisJobQueue.QUEUE_KEY) == 0
 
     asyncio.run(_run())
+
+
+# --- Bounded Retries / Dead-Letter (M8) ---
+
+
+def test_attempts_starts_at_zero_and_survives_a_recovery():
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        await queue.enqueue({"repo": "hello", "pr_number": 1})
+
+        [raw] = await client.lrange(RedisJobQueue.QUEUE_KEY, 0, -1)
+        assert json.loads(raw)["attempts"] == 0
+
+        await queue.dequeue()  # unacked -> stranded in processing
+        assert await queue.recover_pending() == 1
+
+        [requeued] = await client.lrange(RedisJobQueue.QUEUE_KEY, 0, -1)
+        assert json.loads(requeued)["attempts"] == 1
+
+    asyncio.run(_run())
+
+
+def test_job_is_dead_lettered_after_max_attempts():
+    """A job that keeps killing the worker must stop being resurrected."""
+    from sentinel.monitoring.metrics import metrics
+
+    metrics.reset()
+
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        await queue.enqueue({"repo": "poison", "pr_number": 66})
+
+        # Each cycle simulates one crashed worker: dequeue, never ack, restart.
+        for _ in range(RedisJobQueue.MAX_ATTEMPTS):
+            await queue.dequeue()
+            await queue.recover_pending()
+
+        assert await client.llen(RedisJobQueue.QUEUE_KEY) == 0
+        assert await client.llen(RedisJobQueue.PROCESSING_KEY) == 0
+        assert await client.llen(RedisJobQueue.DEAD_KEY) == 1
+
+        [dead] = await client.lrange(RedisJobQueue.DEAD_KEY, 0, -1)
+        envelope = json.loads(dead)
+        assert envelope["job"] == {"repo": "poison", "pr_number": 66}
+        assert envelope["attempts"] == RedisJobQueue.MAX_ATTEMPTS
+
+        counters = metrics.snapshot()["counters"]
+        assert counters["sentinel_jobs_deadlettered_total"] == 1
+
+    asyncio.run(_run())
+
+
+def test_recover_pending_returns_only_the_requeued_count():
+    """Dead-lettered jobs are not 'recovered' — the count must not include them."""
+
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+
+        # Burn the poison job down to its last life, alone.
+        await queue.enqueue({"repo": "poison", "pr_number": 2})
+        for _ in range(RedisJobQueue.MAX_ATTEMPTS - 1):
+            await queue.dequeue()
+            assert await queue.recover_pending() == 1
+
+        # Strand both: the poison job (one attempt left) and a fresh one.
+        await queue.dequeue()
+        await queue.enqueue({"repo": "healthy", "pr_number": 1})
+        await queue.dequeue()
+
+        requeued = await queue.recover_pending()
+
+        assert requeued == 1  # the healthy job only
+        assert await client.llen(RedisJobQueue.DEAD_KEY) == 1
+        [survivor] = await client.lrange(RedisJobQueue.QUEUE_KEY, 0, -1)
+        assert json.loads(survivor)["job"]["repo"] == "healthy"
+
+    asyncio.run(_run())
+
+
+def test_poison_message_in_processing_is_dropped_not_requeued():
+    async def _run() -> None:
+        client = _fake_client()
+        queue = _queue(client)
+        await client.lpush(RedisJobQueue.PROCESSING_KEY, "not-json-at-all")
+
+        assert await queue.recover_pending() == 0
+        assert await client.llen(RedisJobQueue.QUEUE_KEY) == 0
+        assert await client.llen(RedisJobQueue.PROCESSING_KEY) == 0
+        assert await client.llen(RedisJobQueue.DEAD_KEY) == 0
+
+    asyncio.run(_run())
