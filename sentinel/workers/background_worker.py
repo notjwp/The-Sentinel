@@ -18,11 +18,6 @@ from sentinel.workers.job_queue import JobQueue
 
 logger = get_logger(__name__)
 
-EXISTING_CODE_LIST: list[str] = [
-    "def add(a, b): return a + b",
-    "def subtract(a, b): return a - b",
-]
-
 MAX_CODE_LENGTH = 2 * 1024 * 1024
 SMALL_PAYLOAD_THRESHOLD = 20_000
 TARGET_LATENCY_SECONDS = 0.1
@@ -119,11 +114,18 @@ class BackgroundWorker:
             )
             code = code[:MAX_CODE_LENGTH]
 
-        # Real corpus fetched from the PR's base ref when available (M5); the
-        # static two-function list remains the no-GitHub fallback.
+        # Real corpus fetched from the PR's base ref (M5). With no corpus the
+        # semantic engine is skipped outright rather than compared against a
+        # stand-in: a tiny placeholder corpus can cross the 0.9 threshold and
+        # fabricate a HIGH, which _overall_severity turns into a failing check.
         existing_code_list = job.get("existing_code_list")
         if not isinstance(existing_code_list, list) or not existing_code_list:
-            existing_code_list = EXISTING_CODE_LIST
+            existing_code_list = []
+            logger.info(
+                "No semantic corpus for repo=%s pr_number=%s; skipping duplicate detection",
+                pull_request.repo,
+                pull_request.pr_number,
+            )
 
         assessment_start = time.monotonic()
         try:

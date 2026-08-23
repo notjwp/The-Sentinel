@@ -377,3 +377,46 @@ def test_worker_skips_check_run_when_flag_off(monkeypatch, capsys):
     assert len(fake.posted) == 1
     assert fake.check_runs == []
     assert "PR #14 Risk:" in capsys.readouterr().out
+
+
+def test_assess_skips_semantic_when_the_job_carries_no_corpus():
+    """M8: no corpus -> no duplicate detection, instead of a placeholder comparison.
+
+    This code is verbatim the old two-function fallback corpus, so under the
+    previous behavior it scored a perfect self-match: semantic HIGH, and a
+    failing check run on a PR that duplicated nothing real.
+    """
+    from sentinel.application.risk_engine import RiskEngine
+    from sentinel.domain.services.semantic_service import SemanticService
+    from sentinel.domain.value_objects.severity_level import SeverityLevel
+    from sentinel.infrastructure.semantic.embedding_engine import EmbeddingEngine
+
+    engine = RiskEngine(semantic_service=SemanticService(EmbeddingEngine()))
+    job = {"repo": "hello", "pr_number": 1, "code": "def add(a, b): return a + b"}
+
+    _, assessment = BackgroundWorker._assess(job, engine)
+
+    assert assessment["semantic_findings_count"] == 0
+    assert assessment["severity"] == SeverityLevel.LOW
+
+
+def test_assess_still_detects_duplicates_against_a_real_corpus():
+    """The corpus path is untouched — only the placeholder fallback is gone."""
+    from sentinel.application.risk_engine import RiskEngine
+    from sentinel.domain.services.semantic_service import SemanticService
+    from sentinel.domain.value_objects.severity_level import SeverityLevel
+    from sentinel.infrastructure.semantic.embedding_engine import EmbeddingEngine
+
+    duplicated = "def add(a, b): return a + b"
+    engine = RiskEngine(semantic_service=SemanticService(EmbeddingEngine()))
+    job = {
+        "repo": "hello",
+        "pr_number": 2,
+        "code": duplicated,
+        "existing_code_list": [duplicated],
+    }
+
+    _, assessment = BackgroundWorker._assess(job, engine)
+
+    assert assessment["semantic_findings_count"] == 1
+    assert assessment["severity"] == SeverityLevel.HIGH
