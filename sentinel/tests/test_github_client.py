@@ -1,9 +1,10 @@
 import base64
-import builtins
 import types
+import urllib.error
 
 import pytest
 
+import sentinel.infrastructure.github.github_client as gh
 from sentinel.infrastructure.github.github_client import GitHubClient
 
 
@@ -24,16 +25,14 @@ class _FakeResponse:
         return False
 
 
-class _FakeHTTPError(Exception):
-    def __init__(self, message: str = "http error") -> None:
-        super().__init__(message)
-        self.code = 500
+class _FakeHTTPError(urllib.error.HTTPError):
+    """A real HTTPError so the client's typed handler sees it as GitHub would."""
 
-    def read(self) -> bytes:
-        return b"{}"
+    def __init__(self, message: str = "http error", code: int = 500, headers=None) -> None:
+        super().__init__("https://api.github.com/x", code, message, headers or {}, None)
 
 
-class _FakeURLError(Exception):
+class _FakeURLError(urllib.error.URLError):
     pass
 
 
@@ -45,34 +44,29 @@ def _patch_imports(
     response_payload: bytes = b"{}",
     urlopen_error: Exception | None = None,
 ) -> None:
-    real_import = builtins.__import__
+    """Stub the network and the JWT signer.
 
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "jwt":
-            if jwt_raises:
-                raise ImportError("jwt unavailable")
-            encode = jwt_encode or (lambda payload, private_key, algorithm: "token")
-            return types.SimpleNamespace(encode=encode)
+    Patches the real `urllib.request.urlopen` and `jwt.encode` that
+    `github_client` imports at module scope. (Before M9 the client called
+    `__import__` inside each method purely so this helper could intercept it;
+    patching the bound names is the ordinary way and keeps the production code
+    idiomatic.) Retry backoff is neutralized so error-path tests stay fast.
+    """
+    if jwt_raises:
+        monkeypatch.setattr(gh, "jwt", None)
+    else:
+        encode = jwt_encode or (lambda payload, private_key, algorithm: "token")
+        monkeypatch.setattr(gh, "jwt", types.SimpleNamespace(encode=encode))
 
-        if name == "urllib.request":
-            def request_factory(**kwargs):
-                return kwargs
+    def fake_urlopen(request, timeout=10):
+        _ = request
+        _ = timeout
+        if urlopen_error is not None:
+            raise urlopen_error
+        return _FakeResponse(response_payload)
 
-            def fake_urlopen(request, timeout=10):
-                _ = request
-                _ = timeout
-                if urlopen_error is not None:
-                    raise urlopen_error
-                return _FakeResponse(response_payload)
-
-            return types.SimpleNamespace(Request=request_factory, urlopen=fake_urlopen)
-
-        if name == "urllib.error":
-            return types.SimpleNamespace(HTTPError=_FakeHTTPError, URLError=_FakeURLError)
-
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(gh.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gh.GitHubClient, "_sleep", staticmethod(lambda _s: None))
 
 
 def test_build_app_jwt_success_with_bytes(monkeypatch):
@@ -893,3 +887,105 @@ def test_create_check_run_guards_and_failure(monkeypatch):
     monkeypatch.setattr(client, "_get_installation_token", lambda: "installation-token")
     monkeypatch.setattr(client, "_http_json", lambda *a, **k: None)
     assert client.create_check_run("octo", "repo", "sha", **kwargs) is False
+
+
+# --- Retry, throttling, and logging (M9 Tier 2) ---
+
+
+def _client() -> GitHubClient:
+    return GitHubClient(app_id="123", installation_id="1", private_key="private")
+
+
+def _urlopen_sequence(monkeypatch, outcomes):
+    """Serve one outcome per call: an Exception is raised, bytes are returned."""
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=10):
+        _ = request, timeout
+        outcome = outcomes[min(calls["n"], len(outcomes) - 1)]
+        calls["n"] += 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _FakeResponse(outcome)
+
+    monkeypatch.setattr(gh, "jwt", types.SimpleNamespace(encode=lambda *a, **k: "t"))
+    monkeypatch.setattr(gh.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gh.GitHubClient, "_sleep", staticmethod(lambda _s: None))
+    return calls
+
+
+def test_transient_5xx_is_retried_then_succeeds(monkeypatch):
+    calls = _urlopen_sequence(
+        monkeypatch, [_FakeHTTPError("boom", code=503), b'{"id": 7}']
+    )
+    assert _client()._http_json("GET", "https://api.github.com/x", headers={}) == {"id": 7}
+    assert calls["n"] == 2
+
+
+def test_retries_are_bounded(monkeypatch):
+    calls = _urlopen_sequence(monkeypatch, [_FakeHTTPError("boom", code=500)])
+    assert _client()._http_json("GET", "https://api.github.com/x", headers={}) is None
+    assert calls["n"] == GitHubClient.MAX_RETRIES + 1
+
+
+def test_permission_errors_are_not_retried(monkeypatch):
+    """401/404 are configuration problems; hammering them helps nobody."""
+    for code in (401, 404):
+        calls = _urlopen_sequence(monkeypatch, [_FakeHTTPError("nope", code=code)])
+        assert _client()._http_json("GET", "https://api.github.com/x", headers={}) is None
+        assert calls["n"] == 1, code
+
+
+def test_secondary_rate_limit_honors_retry_after(monkeypatch):
+    slept: list[float] = []
+    throttled = _FakeHTTPError("slow down", code=403, headers={"Retry-After": "2"})
+    calls = _urlopen_sequence(monkeypatch, [throttled, b"{}"])
+    monkeypatch.setattr(gh.GitHubClient, "_sleep", staticmethod(slept.append))
+
+    assert _client()._http_json("GET", "https://api.github.com/x", headers={}) == {}
+    assert calls["n"] == 2
+    assert slept == [2.0]
+
+
+def test_primary_rate_limit_waits_until_reset(monkeypatch):
+    slept: list[float] = []
+    limited = _FakeHTTPError(
+        "rate limited", code=403,
+        headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(gh.GitHubClient._now()) + 3)},
+    )
+    _urlopen_sequence(monkeypatch, [limited, b"{}"])
+    monkeypatch.setattr(gh.GitHubClient, "_sleep", staticmethod(slept.append))
+
+    assert _client()._http_json("GET", "https://api.github.com/x", headers={}) == {}
+    assert slept and 0 < slept[0] <= 3.0
+
+
+def test_rate_limit_wait_is_clamped(monkeypatch):
+    """A reset an hour out must not park a worker for an hour."""
+    far = _FakeHTTPError(
+        "rate limited", code=403,
+        headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(gh.GitHubClient._now()) + 3600)},
+    )
+    assert GitHubClient._retry_after_seconds(far) == GitHubClient.MAX_RETRY_SLEEP
+
+
+def test_failures_are_logged_with_their_status(monkeypatch, caplog):
+    """The whole point: a 401 must be distinguishable from a clean run."""
+    _urlopen_sequence(monkeypatch, [_FakeHTTPError("unauthorized", code=401)])
+    with caplog.at_level("ERROR"):
+        _client()._http_json("GET", "https://api.github.com/repos/o/r/pulls/1", headers={})
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("401" in m and "/repos/o/r/pulls/1" in m for m in messages), messages
+
+
+def test_log_label_omits_query_strings_and_host():
+    label = GitHubClient._endpoint_label("https://api.github.com/repos/o/r/pulls?per_page=100&page=2")
+    assert label == "/repos/o/r/pulls"
+
+
+def test_list_endpoint_distinguishes_empty_body_from_failure(monkeypatch):
+    _urlopen_sequence(monkeypatch, [b""])
+    assert _client()._http_json_list("GET", "https://api.github.com/x", headers={}) == []
+
+    _urlopen_sequence(monkeypatch, [b'{"not": "a list"}'])
+    assert _client()._http_json_list("GET", "https://api.github.com/x", headers={}) is None

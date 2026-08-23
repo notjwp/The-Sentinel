@@ -1,10 +1,23 @@
 import base64
+import datetime
 import json
 import re
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+try:  # pragma: no cover - exercised implicitly; absence is handled at call time
+    import jwt
+except ImportError:  # pragma: no cover
+    jwt = None
+
 from sentinel.domain.services.document_service import DocumentService
+from sentinel.monitoring.logger import get_logger
+from sentinel.monitoring.metrics import metrics
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -13,6 +26,15 @@ class GitHubClient:
     installation_id: str | None
     private_key: str | None
     api_base_url: str = "https://api.github.com"
+    timeout: float = 10.0
+
+    # Transient statuses worth another attempt. 403 is deliberately absent: it is
+    # usually a permission problem, and only retried when it carries throttling
+    # headers (see _retry_after_seconds).
+    RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+    MAX_RETRIES = 2  # 3 attempts total
+    RETRY_BASE_SECONDS = 0.25
+    MAX_RETRY_SLEEP = 8.0
 
     # Hidden marker embedded in Sentinel's own PR comments so re-runs can find and
     # update the existing review in place instead of stacking duplicates. Bare (no
@@ -45,21 +67,31 @@ class GitHubClient:
 
     @staticmethod
     def _now() -> float:
-        return float(__import__("time").time())
+        return float(time.time())
+
+    @staticmethod
+    def _sleep(seconds: float) -> None:
+        """Isolated so tests can neutralize retry backoff without real waiting."""
+        try:
+            time.sleep(seconds)
+        except Exception:  # pragma: no cover - defensive
+            return
 
     @staticmethod
     def _parse_expiry(expires_at: str | None) -> float:
         if not expires_at:
             return GitHubClient._now() + 300.0
         try:
-            datetime_module = __import__("datetime")
-            parsed = datetime_module.datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            parsed = datetime.datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
             return float(parsed.timestamp())
         except Exception:
             return GitHubClient._now() + 300.0
 
     def _build_app_jwt(self) -> str | None:
         if not self.app_id or not self.private_key:
+            return None
+        if jwt is None:
+            logger.error("PyJWT is not installed; cannot authenticate as a GitHub App")
             return None
 
         now = int(self._now())
@@ -70,14 +102,121 @@ class GitHubClient:
         }
 
         try:
-            jwt_module = __import__("jwt")
-            token = jwt_module.encode(payload, self.private_key, algorithm="RS256")
+            token = jwt.encode(payload, self.private_key, algorithm="RS256")
         except Exception:
+            # Almost always a malformed GITHUB_PRIVATE_KEY. Never log the key.
+            logger.exception("Failed to sign the GitHub App JWT; check GITHUB_PRIVATE_KEY")
             return None
 
         if isinstance(token, bytes):
             return token.decode("utf-8")
         return str(token)
+
+    @staticmethod
+    def _endpoint_label(url: str) -> str:
+        """Path only, for logs. Keeps query strings and any host credentials out."""
+        without_scheme = url.split("://", 1)[-1]
+        path = without_scheme.split("/", 1)[1] if "/" in without_scheme else without_scheme
+        return "/" + path.split("?", 1)[0]
+
+    @classmethod
+    def _retry_after_seconds(cls, exc: Exception) -> float | None:
+        """Seconds GitHub asked us to wait, or None if it didn't.
+
+        Covers both throttles: secondary limits send ``Retry-After``, primary
+        limits send ``X-RateLimit-Remaining: 0`` plus an absolute
+        ``X-RateLimit-Reset`` epoch. Clamped — a reset can be an hour out, and
+        blocking a worker that long is worse than failing the review.
+        """
+        headers = getattr(exc, "headers", None)
+        if headers is None:
+            return None
+        try:
+            retry_after = headers.get("Retry-After")
+            if retry_after is not None:
+                return max(0.0, min(float(retry_after), cls.MAX_RETRY_SLEEP))
+            if str(headers.get("X-RateLimit-Remaining")) == "0":
+                reset = headers.get("X-RateLimit-Reset")
+                if reset is not None:
+                    return max(0.0, min(float(reset) - cls._now(), cls.MAX_RETRY_SLEEP))
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        data: dict[str, Any] | None = None,
+    ) -> Any | None:
+        """The one HTTP primitive. Returns parsed JSON, or None on failure.
+
+        Retries transient failures (5xx, connection errors) and throttles, honoring
+        ``Retry-After`` when GitHub sends one. Every failure is logged with its
+        status — previously this layer swallowed 401s, 403s and 404s identically
+        and silently, which made a misconfigured install indistinguishable from a
+        clean run. Headers are never logged: they carry the installation token.
+        """
+        payload_bytes = json.dumps(data).encode("utf-8") if data is not None else None
+        label = self._endpoint_label(url)
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                request = urllib.request.Request(
+                    url=url, data=payload_bytes, headers=headers, method=method
+                )
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    raw = response.read().decode("utf-8")
+                if raw.strip() == "":
+                    return {}
+                return json.loads(raw)
+
+            except urllib.error.HTTPError as exc:
+                status = getattr(exc, "code", None)
+                retry_after = self._retry_after_seconds(exc)
+                throttled = retry_after is not None
+                if (status in self.RETRYABLE_STATUS or throttled) and attempt < self.MAX_RETRIES:
+                    delay = retry_after if throttled else self._backoff_seconds(attempt)
+                    logger.warning(
+                        "GitHub %s %s -> HTTP %s%s; retrying in %.1fs (attempt %s/%s)",
+                        method, label, status, " (throttled)" if throttled else "",
+                        delay, attempt + 1, self.MAX_RETRIES,
+                    )
+                    metrics.counter_inc("sentinel_github_api_errors_total",
+                                        {"status": str(status), "outcome": "retried"})
+                    self._sleep(delay)
+                    continue
+                logger.error("GitHub %s %s failed: HTTP %s", method, label, status)
+                metrics.counter_inc("sentinel_github_api_errors_total",
+                                    {"status": str(status), "outcome": "failed"})
+                return None
+
+            except urllib.error.URLError as exc:
+                if attempt < self.MAX_RETRIES:
+                    delay = self._backoff_seconds(attempt)
+                    logger.warning(
+                        "GitHub %s %s unreachable (%s); retrying in %.1fs",
+                        method, label, exc.reason, delay,
+                    )
+                    self._sleep(delay)
+                    continue
+                logger.error("GitHub %s %s unreachable: %s", method, label, exc.reason)
+                metrics.counter_inc("sentinel_github_api_errors_total",
+                                    {"status": "network", "outcome": "failed"})
+                return None
+
+            except Exception:
+                logger.exception("GitHub %s %s raised unexpectedly", method, label)
+                metrics.counter_inc("sentinel_github_api_errors_total",
+                                    {"status": "unknown", "outcome": "failed"})
+                return None
+
+        return None
+
+    @classmethod
+    def _backoff_seconds(cls, attempt: int) -> float:
+        return min(cls.RETRY_BASE_SECONDS * (2**attempt), cls.MAX_RETRY_SLEEP)
 
     def _http_json(
         self,
@@ -86,38 +225,11 @@ class GitHubClient:
         headers: dict[str, str],
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        payload_bytes = None
-        if data is not None:
-            payload_bytes = json.dumps(data).encode("utf-8")
-
-        try:
-            urllib_request = __import__("urllib.request", fromlist=["Request", "urlopen"])
-            urllib_error = __import__("urllib.error", fromlist=["HTTPError", "URLError"])
-            request = urllib_request.Request(
-                url=url,
-                data=payload_bytes,
-                headers=headers,
-                method=method,
-            )
-            with urllib_request.urlopen(request, timeout=10) as response:
-                raw = response.read().decode("utf-8")
-                if raw.strip() == "":
-                    return {}
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    return parsed
-                return {}
-        except Exception as exc:
-            if hasattr(exc, "code") and hasattr(exc, "read"):
-                try:
-                    _ = exc.read()
-                except Exception:
-                    pass
-            if isinstance(exc, getattr(urllib_error, "URLError", tuple())):
-                return None
-            if isinstance(exc, getattr(urllib_error, "HTTPError", tuple())):
-                return None
+        """A JSON object endpoint. {} for a non-object body, None on failure."""
+        parsed = self._request(method, url, headers, data)
+        if parsed is None:
             return None
+        return parsed if isinstance(parsed, dict) else {}
 
     def _http_json_list(
         self,
@@ -126,45 +238,18 @@ class GitHubClient:
         headers: dict[str, str],
         data: dict[str, Any] | None = None,
     ) -> list[Any] | None:
-        """Like _http_json, but for endpoints that return a JSON array.
+        """A JSON array endpoint (e.g. list PR files). None on failure or non-array.
 
-        _http_json intentionally discards non-dict bodies (returns {}); the GitHub
-        "list PR files" endpoint returns an array, so it needs its own primitive.
-        Returns the parsed list on success, [] for an empty body, None on any error
-        or when the body is not a list.
+        Distinct from _http_json because that one flattens non-objects to {},
+        which would turn a page of results into "empty page" and silently end
+        pagination.
         """
-        payload_bytes = None
-        if data is not None:
-            payload_bytes = json.dumps(data).encode("utf-8")
-
-        try:
-            urllib_request = __import__("urllib.request", fromlist=["Request", "urlopen"])
-            urllib_error = __import__("urllib.error", fromlist=["HTTPError", "URLError"])
-            request = urllib_request.Request(
-                url=url,
-                data=payload_bytes,
-                headers=headers,
-                method=method,
-            )
-            with urllib_request.urlopen(request, timeout=10) as response:
-                raw = response.read().decode("utf-8")
-                if raw.strip() == "":
-                    return []
-                parsed = json.loads(raw)
-                if isinstance(parsed, list):
-                    return parsed
-                return None
-        except Exception as exc:
-            if hasattr(exc, "code") and hasattr(exc, "read"):
-                try:
-                    _ = exc.read()
-                except Exception:
-                    pass
-            if isinstance(exc, getattr(urllib_error, "URLError", tuple())):
-                return None
-            if isinstance(exc, getattr(urllib_error, "HTTPError", tuple())):
-                return None
+        parsed = self._request(method, url, headers, data)
+        if parsed is None:
             return None
+        if isinstance(parsed, dict) and not parsed:
+            return []  # empty body
+        return parsed if isinstance(parsed, list) else None
 
     def _get_paginated(self, endpoint: str, headers: dict[str, str]) -> list[dict[str, Any]]:
         """GET all pages of a GitHub list endpoint (up to MAX_LIST_PAGES).

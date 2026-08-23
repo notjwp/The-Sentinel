@@ -93,8 +93,11 @@ class MetricsRegistry:
     def render_prometheus(self) -> str:
         """Prometheus text exposition (version 0.0.4).
 
-        Summaries emit ``_count``/``_sum`` (standard) plus ``_min``/``_max``
-        (non-standard but harmless — scraped as untyped series).
+        A summary family may contain only ``_count``, ``_sum`` and quantile
+        series. ``_min``/``_max`` used to be emitted inside it, which a strict
+        parser rejects — taking the whole scrape down, not just those two lines.
+        They are still exposed, but as their own gauge families, which is both
+        valid and what they actually are.
         """
         try:
             with self._lock:
@@ -108,13 +111,25 @@ class MetricsRegistry:
                     lines.append(f"# TYPE {name} {kind}")
                     for key in sorted(k for k in family if k[0] == name):
                         lines.append(f"{_series(key)} {_number(family[key])}")
+
             for name in sorted({key[0] for key in summaries}):
+                keys = sorted(k for k in summaries if k[0] == name)
                 lines.append(f"# TYPE {name} summary")
-                for key in sorted(k for k in summaries if k[0] == name):
-                    stats = summaries[key]
+                for key in keys:
                     base, labels = key
-                    for stat in ("count", "sum", "min", "max"):
-                        lines.append(f"{_series((f'{base}_{stat}', labels))} {_number(stats[stat])}")
+                    for stat in ("count", "sum"):
+                        lines.append(
+                            f"{_series((f'{base}_{stat}', labels))} {_number(summaries[key][stat])}"
+                        )
+                # min/max are separate gauge families, declared after the summary
+                # so each name carries exactly one TYPE line.
+                for stat in ("min", "max"):
+                    lines.append(f"# TYPE {name}_{stat} gauge")
+                    for key in keys:
+                        base, labels = key
+                        lines.append(
+                            f"{_series((f'{base}_{stat}', labels))} {_number(summaries[key][stat])}"
+                        )
             return "\n".join(lines) + ("\n" if lines else "")
         except Exception:
             return ""

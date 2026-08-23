@@ -168,7 +168,7 @@ class AuditOrchestrator:
             if security_findings:
                 for finding in security_findings:
                     lines.append(
-                        f"- {finding.description or finding.rule} (Severity: {finding.severity.value})"
+                        f"- {finding.description or finding.rule} (Severity: {self._severity_value(finding.severity)})"
                     )
             else:
                 lines.append("- No security issues detected.")
@@ -194,7 +194,7 @@ class AuditOrchestrator:
                 lines.extend(["", "## Documentation Issues"])
                 for finding in documentation_findings:
                     lines.append(
-                        f"- {finding.description or finding.rule} (Severity: {finding.severity.value})"
+                        f"- {finding.description or finding.rule} (Severity: {self._severity_value(finding.severity)})"
                     )
 
             lines.extend(["", "## Technical Debt"])

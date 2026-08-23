@@ -207,6 +207,14 @@ def test_infrastructure_imports_only_allowed():
         "asyncio",
         "uuid",
         "time",
+        # The GitHub adapter's actual transport and auth. These were always used,
+        # but via `__import__` inside method bodies, which this AST scan cannot
+        # see — so the guard passed while the dependencies were undeclared. M9
+        # moved them to real imports; listing them here is the honest state.
+        "datetime",
+        "urllib",
+        "jwt",
+        "openai",
     ]
 
     for path in _python_files(INFRASTRUCTURE_DIR):
