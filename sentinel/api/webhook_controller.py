@@ -5,6 +5,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from sentinel.api.delivery_dedup import DeliveryDeduper
+from sentinel.api.webhook_events import should_process
 from sentinel.api.webhook_security import verify_webhook_signature
 from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
@@ -116,6 +117,19 @@ def _as_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+async def _raw_json(request: Request) -> dict[str, Any]:
+    """Best-effort parse of the request body as a JSON object; {} on anything else.
+
+    Starlette caches the body, so calling this alongside the signature
+    dependency and the later ``await request.json()`` reads it only once.
+    """
+    try:
+        parsed = await request.json()
+    except Exception:
+        return {}
+    return _as_dict(parsed)
 
 
 def _extract_repo_name(raw_payload: dict[str, Any], fallback_repo: str | None) -> str | None:
@@ -490,6 +504,17 @@ async def webhook(
     ),
     orchestrator: AuditOrchestrator = Depends(get_orchestrator),
 ) -> dict[str, Any]:
+    # Event gate: only pull_request deliveries that changed the code get reviewed.
+    # Ahead of dedup so an ignored event never consumes a dedup slot (or a Redis
+    # write). No X-GitHub-Event header -> no filtering, so manual calls behave as
+    # before. Answered 200: GitHub records any non-2xx as a failed delivery.
+    event = request.headers.get("X-GitHub-Event")
+    allowed, reason = should_process(event, await _raw_json(request) if event else {})
+    if not allowed:
+        logger.info("Ignoring webhook delivery (%s)", reason)
+        metrics.counter_inc("sentinel_webhooks_total", {"mode": "ignored"})
+        return {"status": "ignored", "event": event}
+
     # Runs after signature verification (the route dependency) and ahead of both
     # modes: a re-sent delivery is answered 200 without any re-processing.
     delivery_id = request.headers.get("X-GitHub-Delivery")
