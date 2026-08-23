@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import sys
 import time
 
@@ -461,16 +462,40 @@ class BackgroundWorker:
         while True:
             try:
                 job = await self.queue.dequeue()
-                # Offload the entire blocking pipeline so a slow GitHub GET / LLM call
-                # can never stall the shared event loop (health, webhooks, queue intake).
-                await asyncio.to_thread(
-                    self._process_one, job, risk_engine, orchestrator, github_client
+                # Shielded so a shutdown mid-job lets that job finish and ack
+                # instead of being abandoned unacked. The shield alone would
+                # return control immediately and orphan the inner task, so the
+                # cancellation handler awaits it to completion before re-raising.
+                in_flight = asyncio.ensure_future(
+                    self._run_and_ack(job, risk_engine, orchestrator, github_client)
                 )
-                # Only a fully processed job is acked; a crash before this line
-                # leaves it in the processing list for recovery on next start.
-                await self.queue.ack(job)
-                self.processed_count += 1
-                metrics.counter_inc("sentinel_jobs_processed_total")
+                try:
+                    await asyncio.shield(in_flight)
+                except asyncio.CancelledError:
+                    with contextlib.suppress(Exception):
+                        await in_flight
+                    raise
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("Worker failed to process job; continuing")
                 await asyncio.sleep(self.ERROR_BACKOFF_SECONDS)
+
+    async def _run_and_ack(
+        self,
+        job: dict,
+        risk_engine: RiskEngine,
+        orchestrator: AuditOrchestrator,
+        github_client: GitHubClient | None,
+    ) -> None:
+        """Process one job, then ack it. The unit shutdown is allowed to finish."""
+        # Offload the entire blocking pipeline so a slow GitHub GET / LLM call
+        # can never stall the shared event loop (health, webhooks, queue intake).
+        await asyncio.to_thread(
+            self._process_one, job, risk_engine, orchestrator, github_client
+        )
+        # Only a fully processed job is acked; a crash before this line
+        # leaves it in the processing list for recovery on next start.
+        await self.queue.ack(job)
+        self.processed_count += 1
+        metrics.counter_inc("sentinel_jobs_processed_total")

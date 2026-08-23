@@ -318,3 +318,85 @@ def test_only_the_error_path_backs_off():
         assert slept == [BackgroundWorker.ERROR_BACKOFF_SECONDS]
 
     asyncio.run(_run())
+
+
+# --- Graceful Shutdown Of An In-Flight Job (M8) ---
+
+
+def test_cancellation_lets_the_in_flight_job_finish_and_ack(monkeypatch):
+    """Shutdown mid-job must not abandon it unacked.
+
+    Before this, cancelling the worker dropped the to_thread await: the job's
+    thread kept running, queue.ack() was never reached, and (on Redis) the job
+    sat in the processing list until the next restart re-ran it.
+    """
+    import threading
+    import time
+
+    started = threading.Event()
+    processed: list[dict] = []
+    acked: list[dict] = []
+
+    class _AckTrackingQueue(JobQueue):
+        async def ack(self, job: dict) -> None:
+            acked.append(job)
+
+    def _slow_process(self, job, risk_engine, orchestrator, github_client) -> None:
+        started.set()
+        time.sleep(0.25)  # in a worker thread (to_thread), not on the loop
+        processed.append(job)
+
+    monkeypatch.setattr(BackgroundWorker, "_process_one", _slow_process)
+
+    async def _run() -> None:
+        real_sleep = asyncio.sleep
+        queue = _AckTrackingQueue()
+        worker = BackgroundWorker(queue)
+        await queue.enqueue({"repo": "inflight", "pr_number": 1})
+
+        task = asyncio.create_task(worker.start())
+        for _ in range(500):  # wait until the job is genuinely in flight
+            if started.is_set():
+                break
+            await real_sleep(0.01)
+        assert started.is_set()
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert processed == [{"repo": "inflight", "pr_number": 1}]
+        assert acked == processed  # the whole point: it was acked, not abandoned
+        assert worker.processed_count == 1
+
+        pending = [
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()
+        ]
+        assert pending == []
+
+    asyncio.run(_run())
+
+
+def test_cancellation_while_idle_still_stops_promptly():
+    """No job in flight: cancel must propagate, not be swallowed by the retry loop."""
+
+    async def _run() -> None:
+        queue = JobQueue()
+        worker = BackgroundWorker(queue)
+
+        task = asyncio.create_task(worker.start())
+        await asyncio.sleep(0.05)  # settle into the blocking dequeue
+
+        task.cancel()
+        cancelled = False
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except asyncio.CancelledError:
+            cancelled = True
+
+        assert cancelled
+        assert worker.processed_count == 0
+
+    asyncio.run(_run())

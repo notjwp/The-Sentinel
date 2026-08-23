@@ -6,6 +6,7 @@ orchestrator, the background worker (started via lifespan), and the routers
 """
 
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -22,6 +23,9 @@ from sentinel.workers.background_worker import BackgroundWorker
 from sentinel.workers.job_queue import JobQueue
 
 logger = get_logger(__name__)
+
+# How long shutdown waits for the worker's in-flight job to finish and ack.
+SHUTDOWN_GRACE_SECONDS = 10.0
 
 # Composition root: REDIS_URL set -> durable Redis queue; unset -> in-memory.
 _settings = get_settings()
@@ -49,7 +53,12 @@ async def lifespan(app: FastAPI):
     finally:
         worker_task = getattr(app.state, "worker_task", None)
         if worker_task:
+            # The worker shields an in-flight job, so cancelling lets that job
+            # finish and ack rather than abandoning it. Bound the wait so a
+            # wedged job cannot hold shutdown open indefinitely.
             worker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await asyncio.wait_for(worker_task, timeout=SHUTDOWN_GRACE_SECONDS)
 
 
 app = FastAPI(title="The Sentinel", lifespan=lifespan)
