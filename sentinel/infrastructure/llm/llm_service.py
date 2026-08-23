@@ -3,29 +3,8 @@ import re
 from sentinel.domain.value_objects.severity_level import SeverityLevel
 from sentinel.infrastructure.llm.base import LLMProvider
 from sentinel.infrastructure.llm.nim_provider import NIMProvider
+from sentinel.monitoring.logger import get_logger
 from sentinel.monitoring.metrics import metrics
-
-
-def _get_logger(name: str):
-    try:
-        logger_module = __import__("sentinel.monitoring.logger", fromlist=["get_logger"])
-        get_logger = getattr(logger_module, "get_logger", None)
-        if callable(get_logger):
-            return get_logger(name)
-    except Exception:
-        pass
-
-    class _FallbackLogger:
-        def info(self, msg: str, *args: object, **_: object) -> None:
-            print(msg % args if args else msg)
-
-        def warning(self, msg: str, *args: object, **_: object) -> None:
-            print(msg % args if args else msg)
-
-        def exception(self, msg: str, *args: object, **_: object) -> None:
-            print(msg % args if args else msg)
-
-    return _FallbackLogger()
 
 
 class LLMService:
@@ -54,7 +33,7 @@ class LLMService:
         base_url: str | None = None,
         model: str | None = None,
     ) -> None:
-        self.logger = _get_logger(__name__)
+        self.logger = get_logger(__name__)
         self.provider = provider
         if self.provider is None and enable_llm:
             provider_kwargs: dict[str, object] = {"api_key": api_key, "timeout": timeout}

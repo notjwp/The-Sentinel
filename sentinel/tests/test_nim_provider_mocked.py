@@ -1,7 +1,6 @@
-import builtins
-import sys
 import types
 
+import sentinel.infrastructure.llm.nim_provider as np
 from sentinel.infrastructure.llm.nim_provider import NIMProvider
 
 
@@ -33,21 +32,15 @@ class _ResponseObj:
         self.choices = choices
 
 
-def test_build_client_returns_none_when_import_missing(monkeypatch):
-    real_import = builtins.__import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "openai":
-            raise ImportError("missing")
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+def test_build_client_returns_none_when_openai_is_not_installed(monkeypatch):
+    """nim_provider binds `openai` at import; absence leaves the name None."""
+    monkeypatch.setattr(np, "openai", None)
     provider = NIMProvider(api_key="key", client=None)
     assert provider._client is None
 
 
 def test_build_client_returns_none_when_openai_class_missing(monkeypatch):
-    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace())
+    monkeypatch.setattr(np, "openai", types.SimpleNamespace())
     provider = NIMProvider(api_key="key", client=None)
     assert provider._client is None
 
@@ -57,7 +50,7 @@ def test_build_client_returns_none_when_constructor_fails(monkeypatch):
         def __init__(self, **kwargs):
             raise RuntimeError("boom")
 
-    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_OpenAI))
+    monkeypatch.setattr(np, "openai", types.SimpleNamespace(OpenAI=_OpenAI))
     provider = NIMProvider(api_key="key", client=None)
     assert provider._client is None
 
@@ -69,7 +62,7 @@ def test_build_client_success_passes_base_url_and_timeout(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_OpenAI))
+    monkeypatch.setattr(np, "openai", types.SimpleNamespace(OpenAI=_OpenAI))
     provider = NIMProvider(api_key="key", timeout=7.0, client=None)
 
     assert provider._client is not None

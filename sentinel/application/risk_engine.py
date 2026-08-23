@@ -58,6 +58,84 @@ class RiskEngine:
             return SeverityLevel.MEDIUM
         return SeverityLevel.LOW
 
+    # Per-engine safe defaults, used only by the resilient variant.
+    _DEBT_DEFAULT = {"complexity": 1, "maintainability": 100.0, "severity": SeverityLevel.LOW}
+    _SECURITY_DEFAULT = {"findings": [], "severity": SeverityLevel.LOW}
+
+    @staticmethod
+    def _run(label: str, call, default, *, resilient: bool):
+        """Run one engine. Strict mode propagates; resilient mode logs and degrades."""
+        if not resilient:
+            return call()
+        try:
+            return call()
+        except Exception:
+            logger.exception("%s engine failed; continuing with safe defaults", label)
+            return default() if callable(default) else default
+
+    def _assess(
+        self,
+        code: str,
+        existing_code_list: list[str] | None,
+        *,
+        resilient: bool,
+        warn_threshold_seconds: float | None = None,
+    ) -> dict:
+        """The single assessment implementation behind assess/assess_resilient.
+
+        The two differ only in whether an engine failure propagates or degrades
+        to a safe default, so they share everything else — aggregation, the
+        result shape, and the latency warning.
+        """
+        start_time = time.monotonic()
+
+        debt_result = self._run(
+            "Debt", lambda: self.debt_service.evaluate_debt(code),
+            lambda: dict(self._DEBT_DEFAULT), resilient=resilient,
+        )
+        security_result = self._run(
+            "Security", lambda: self.security_service.analyze(code),
+            lambda: {"findings": [], "severity": SeverityLevel.LOW}, resilient=resilient,
+        )
+
+        semantic_findings: list = []
+        if self.semantic_service and code.strip():
+            semantic_findings = self._run(
+                "Semantic",
+                lambda: self.semantic_service.detect_duplicates(code, existing_code_list or []),
+                list, resilient=resilient,
+            )
+        semantic_severity = (
+            SeverityLevel.HIGH
+            if any(f.severity == SeverityLevel.HIGH for f in semantic_findings)
+            else SeverityLevel.LOW
+        )
+
+        overall_severity = self._overall_severity(
+            debt_severity=self._normalize_severity(debt_result["severity"]),
+            security_severity=self._security_severity_from_result(security_result),
+            semantic_severity=semantic_severity,
+        )
+
+        if warn_threshold_seconds is not None:
+            elapsed = time.monotonic() - start_time
+            if elapsed > warn_threshold_seconds:
+                logger.warning(
+                    "Risk assessment exceeded latency target: %.4fs (threshold %.4fs)",
+                    elapsed,
+                    warn_threshold_seconds,
+                )
+
+        return {
+            "severity": overall_severity,
+            "complexity": debt_result["complexity"],
+            "maintainability": debt_result["maintainability"],
+            "security_findings_count": len(security_result["findings"]),
+            "security": security_result,
+            "semantic_findings_count": len(semantic_findings),
+            "semantic": {"findings": semantic_findings, "severity": semantic_severity},
+        }
+
     def assess_resilient(
         self,
         code: str = "",
@@ -65,110 +143,15 @@ class RiskEngine:
         *,
         warn_threshold_seconds: float = 0.1,
     ) -> dict:
-        start_time = time.monotonic()
-
-        try:
-            debt_result = self.debt_service.evaluate_debt(code)
-        except Exception:
-            logger.exception("Debt engine failed; continuing with safe defaults")
-            debt_result = {
-                "complexity": 1,
-                "maintainability": 100.0,
-                "severity": SeverityLevel.LOW,
-            }
-
-        try:
-            security_result = self.security_service.analyze(code)
-        except Exception:
-            logger.exception("Security engine failed; continuing with safe defaults")
-            security_result = {
-                "findings": [],
-                "severity": SeverityLevel.LOW,
-            }
-
-        semantic_findings = []
-        semantic_severity = SeverityLevel.LOW
-        if self.semantic_service and code.strip():
-            try:
-                semantic_findings = self.semantic_service.detect_duplicates(
-                    code,
-                    existing_code_list or [],
-                )
-                semantic_severity = (
-                    SeverityLevel.HIGH
-                    if any(f.severity == SeverityLevel.HIGH for f in semantic_findings)
-                    else SeverityLevel.LOW
-                )
-            except Exception:
-                logger.exception("Semantic engine failed; continuing with safe defaults")
-
-        debt_severity = self._normalize_severity(debt_result["severity"])
-        security_severity = self._security_severity_from_result(security_result)
-        overall_severity = self._overall_severity(
-            debt_severity=debt_severity,
-            security_severity=security_severity,
-            semantic_severity=semantic_severity,
+        """Engine failures degrade to safe defaults. Use for background work."""
+        return self._assess(
+            code, existing_code_list,
+            resilient=True, warn_threshold_seconds=warn_threshold_seconds,
         )
-
-        elapsed = time.monotonic() - start_time
-        if elapsed > warn_threshold_seconds:
-            logger.warning(
-                "Risk assessment exceeded latency target: %.4fs (threshold %.4fs)",
-                elapsed,
-                warn_threshold_seconds,
-            )
-
-        return {
-            "severity": overall_severity,
-            "complexity": debt_result["complexity"],
-            "maintainability": debt_result["maintainability"],
-            "security_findings_count": len(security_result["findings"]),
-            "security": security_result,
-            "semantic_findings_count": len(semantic_findings),
-            "semantic": {
-                "findings": semantic_findings,
-                "severity": semantic_severity,
-            },
-        }
 
     def assess(self, code: str = "", existing_code_list: list[str] | None = None) -> dict:
-        debt_result = self.debt_service.evaluate_debt(code)
-        security_result = self.security_service.analyze(code)
-
-        debt_severity = self._normalize_severity(debt_result["severity"])
-        security_severity = self._security_severity_from_result(security_result)
-
-        if self.semantic_service and code.strip():
-            semantic_findings = self.semantic_service.detect_duplicates(
-                code, existing_code_list or []
-            )
-            semantic_severity = (
-                SeverityLevel.HIGH
-                if any(f.severity == SeverityLevel.HIGH for f in semantic_findings)
-                else SeverityLevel.LOW
-            )
-        else:
-            semantic_findings = []
-            semantic_severity = SeverityLevel.LOW
-
-        overall_severity = self._overall_severity(
-            debt_severity=debt_severity,
-            security_severity=security_severity,
-            semantic_severity=semantic_severity,
-        )
-
-        return {
-            "severity": overall_severity,
-            "complexity": debt_result["complexity"],
-            "maintainability": debt_result["maintainability"],
-            "security_findings_count": len(security_result["findings"]),
-            "security": security_result,
-            "semantic_findings_count": len(semantic_findings),
-            "semantic": {
-                "findings": semantic_findings,
-                "severity": semantic_severity,
-            },
-        }
+        """Engine failures propagate. Use where the caller must see the error."""
+        return self._assess(code, existing_code_list, resilient=False)
 
     def calculate_risk(
         self,

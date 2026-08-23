@@ -1,29 +1,14 @@
 import os
+import time
 from typing import Any
 
+try:  # pragma: no cover - absence is handled in _build_client
+    import openai
+except ImportError:  # pragma: no cover
+    openai = None
+
 from sentinel.infrastructure.llm.base import LLMProvider
-
-
-def _get_logger(name: str):
-    try:
-        logger_module = __import__("sentinel.monitoring.logger", fromlist=["get_logger"])
-        get_logger = getattr(logger_module, "get_logger", None)
-        if callable(get_logger):
-            return get_logger(name)
-    except Exception:
-        pass
-
-    class _FallbackLogger:
-        def info(self, msg: str, *args: object, **_: object) -> None:
-            print(msg % args if args else msg)
-
-        def warning(self, msg: str, *args: object, **_: object) -> None:
-            print(msg % args if args else msg)
-
-        def exception(self, msg: str, *args: object, **_: object) -> None:
-            print(msg % args if args else msg)
-
-    return _FallbackLogger()
+from sentinel.monitoring.logger import get_logger
 
 
 class NIMProvider(LLMProvider):
@@ -40,7 +25,7 @@ class NIMProvider(LLMProvider):
         model: str = MODEL,
         client: Any = None,
     ) -> None:
-        self.logger = _get_logger(__name__)
+        self.logger = get_logger(__name__)
         self.api_key = api_key if api_key is not None else os.getenv("NVIDIA_API_KEY", "").strip()
         self.timeout = max(0.0, timeout)
         self.base_url = base_url
@@ -49,23 +34,20 @@ class NIMProvider(LLMProvider):
 
     @staticmethod
     def _sleep(seconds: float) -> None:
+        """Isolated so tests can neutralize retry backoff without real waiting."""
         try:
-            time_module = __import__("time")
-            sleep = getattr(time_module, "sleep", None)
-            if callable(sleep):
-                sleep(seconds)
-        except Exception:
+            time.sleep(seconds)
+        except Exception:  # pragma: no cover - defensive
             return
 
     def _build_client(self) -> Any | None:
         if not self.api_key:
             return None
-        try:
-            openai_module = __import__("openai")
-        except ImportError:
+        if openai is None:
+            self.logger.warning("openai package is not installed; LLM calls disabled.")
             return None
 
-        openai_cls = getattr(openai_module, "OpenAI", None)
+        openai_cls = getattr(openai, "OpenAI", None)
         if openai_cls is None:
             return None
 
