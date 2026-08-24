@@ -65,3 +65,6 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+# Local dev helper for triggering reviews (contains no secrets, reads .env)
+trigger.sh
