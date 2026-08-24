@@ -271,11 +271,15 @@ class AuditOrchestrator:
                 )
                 path: str | None = None
                 line: int | None = None
+                # A finding that already knows its own file needs no translation.
+                # Documentation findings always have; AST security findings now do
+                # too, because they are produced per-file against full source. Only
+                # regex security findings carry a line relative to the assembled
+                # added-lines blob, and those still resolve through line_map.
                 if (
-                    finding.type == "documentation"
-                    and finding.file
+                    finding.file
                     and finding.file != "inline"  # analyze_code's label, not a real file
-                    and finding.line
+                    and isinstance(finding.line, int)
                 ):
                     path, line = finding.file, finding.line
                 elif (

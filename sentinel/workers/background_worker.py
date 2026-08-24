@@ -7,6 +7,7 @@ from sentinel.application.audit_orchestrator import AuditOrchestrator
 from sentinel.application.risk_engine import RiskEngine
 from sentinel.config.settings import Settings, get_settings
 from sentinel.domain.entities.pull_request import PullRequest
+from sentinel.domain.services.ast_security_service import ASTSecurityService
 from sentinel.domain.services.document_service import DocumentService
 from sentinel.domain.services.semantic_service import SemanticService
 from sentinel.domain.value_objects.severity_level import SeverityLevel
@@ -94,7 +95,9 @@ class BackgroundWorker:
         return f"PR #{pr_number} Risk: {risk_value}"
 
     @staticmethod
-    def _assess(job: dict, risk_engine: RiskEngine) -> tuple[PullRequest, dict]:
+    def _assess(
+        job: dict, risk_engine: RiskEngine, extra_security_findings: list | None = None
+    ) -> tuple[PullRequest, dict]:
         """Read/coerce/truncate the job's code and run the resilient assessment.
 
         Returns the ``PullRequest`` identity plus the full assessment dict (safe
@@ -140,6 +143,7 @@ class BackgroundWorker:
                 code=code,
                 existing_code_list=existing_code_list,
                 warn_threshold_seconds=TARGET_LATENCY_SECONDS,
+                extra_security_findings=extra_security_findings,
             )
         except Exception:
             logger.exception(
@@ -159,6 +163,81 @@ class BackgroundWorker:
             )
 
         return pull_request, assessment
+
+    @staticmethod
+    def _ast_security_findings(job: dict) -> list:
+        """AST findings for every changed .py file whose full source parses.
+
+        Restricted to lines this PR actually added: the analyzer sees the whole
+        module, so without the filter it would report pre-existing problems the
+        author never touched — accurate, but not their PR's business.
+
+        Files handled here are removed from the regex blob by
+        ``_strip_ast_covered_lines``, so the two engines never both report the
+        same line and no de-duplication guesswork is needed.
+        """
+        file_contents = job.get("file_contents")
+        line_map = job.get("line_map")
+        if not isinstance(file_contents, dict) or not isinstance(line_map, list):
+            return []
+
+        added_by_file: dict[str, set[int]] = {}
+        for entry in line_map:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                path, line_no = entry
+                if isinstance(path, str) and isinstance(line_no, int):
+                    added_by_file.setdefault(path, set()).add(line_no)
+
+        analyzer = ASTSecurityService()
+        findings: list = []
+        covered: list[str] = []
+        for path, source in file_contents.items():
+            if not isinstance(path, str) or not path.lower().endswith(".py"):
+                continue
+            file_findings = analyzer.analyze_source(source, path)
+            if file_findings is None:
+                continue  # unparseable — leave it to the regex engine
+            covered.append(path)
+            touched = added_by_file.get(path, set())
+            findings.extend(
+                f for f in file_findings if isinstance(f.line, int) and f.line in touched
+            )
+
+        if covered:
+            job["ast_covered_files"] = covered
+            logger.info(
+                "AST security analysis covered %s file(s): %s", len(covered), ", ".join(covered)
+            )
+        return findings
+
+    @staticmethod
+    def _strip_ast_covered_lines(job: dict) -> None:
+        """Remove AST-analyzed files from the regex blob, in lockstep with line_map.
+
+        The blob and the map are index-parallel by construction, so both are
+        filtered by the same predicate to keep them that way.
+        """
+        covered = set(job.get("ast_covered_files") or [])
+        line_map = job.get("line_map")
+        code = job.get("code")
+        if not covered or not isinstance(line_map, list) or not isinstance(code, str):
+            return
+
+        code_lines = code.split("\n")
+        if len(code_lines) != len(line_map):
+            return  # shapes disagree; leave both alone rather than corrupt them
+
+        kept = [
+            (text, entry)
+            for text, entry in zip(code_lines, line_map)
+            if not (
+                isinstance(entry, (list, tuple))
+                and len(entry) == 2
+                and entry[0] in covered
+            )
+        ]
+        job["code"] = "\n".join(text for text, _ in kept)
+        job["line_map"] = [entry for _, entry in kept]
 
     @staticmethod
     def process_job(job: dict, risk_engine: RiskEngine) -> str:
@@ -423,7 +502,13 @@ class BackgroundWorker:
             metrics.observe("sentinel_job_duration_seconds", time.monotonic() - start_time)
             return
 
-        pull_request, assessment = self._assess(job, risk_engine)
+        # Structure-aware analysis first: it claims the files it can parse, and
+        # those lines are then withheld from the text-matching engine so a single
+        # line is never reported by both.
+        ast_findings = self._ast_security_findings(job)
+        self._strip_ast_covered_lines(job)
+
+        pull_request, assessment = self._assess(job, risk_engine, ast_findings)
         risk = assessment["severity"]
         report_line = self._format_risk_line(pull_request.pr_number, risk)
         metrics.counter_inc(

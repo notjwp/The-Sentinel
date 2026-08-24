@@ -46,6 +46,9 @@ class GitHubClient:
 
     # Bounds for repo-content fetches (semantic corpus + full doc content).
     CORPUS_MAX_FILES = 20  # most .py blobs fetched per corpus build
+    # Full-source fetches for AST analysis cost one API call per file, so the
+    # budget is capped; files beyond it fall back to regex over their diff.
+    MAX_SOURCE_FETCHES = 20
     CORPUS_MAX_FILE_BYTES = 50_000  # skip larger blobs (tree items carry size)
     MAX_CONTENT_BYTES = 200_000  # hard cap on any decoded file content
 
@@ -673,16 +676,26 @@ class GitHubClient:
         files: list[str] = []
         file_contents: dict[str, str] = {}
         line_map: list[tuple[str, int]] = []
+        source_fetches = 0
         for item in items:
             name = item.get("filename")
             patch = item.get("patch")
             if isinstance(name, str) and name:
                 files.append(name)
                 full_content: str | None = None
-                if name.strip().lower().endswith(DocumentService.DOC_EXTENSIONS):
+                lowered = name.strip().lower()
+                # Docs are judged on their whole text; .py files need full source
+                # because an AST needs a complete module — a diff fragment does
+                # not parse. Both come from the same contents_url fetch.
+                wants_full_source = lowered.endswith(DocumentService.DOC_EXTENSIONS) or (
+                    lowered.endswith(".py") and source_fetches < self.MAX_SOURCE_FETCHES
+                )
+                if wants_full_source:
                     contents_url = item.get("contents_url")
                     if isinstance(contents_url, str):
                         full_content = self.get_content_by_url(contents_url)
+                        if lowered.endswith(".py"):
+                            source_fetches += 1
                 if full_content is not None:
                     file_contents[name] = full_content
                 elif isinstance(patch, str) and patch:

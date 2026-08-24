@@ -754,24 +754,34 @@ def test_get_repo_code_corpus_failures(monkeypatch):
     assert "def keep" in corpus[0]
 
 
-def test_get_pull_request_data_fetches_full_doc_content(monkeypatch):
+def test_get_pull_request_data_fetches_full_source_for_docs_and_python(monkeypatch):
+    """Both need whole files, for different reasons.
+
+    Docs are judged on their entire text; .py files need a complete module
+    because an AST cannot parse a diff fragment. Other file types keep the patch
+    text, which is all the regex engine requires.
+    """
     client = GitHubClient(app_id="123", installation_id="999", private_key="private")
     items = [
         {"filename": "app.py", "patch": "+x = 1", "contents_url": "https://api.test/c/app"},
         {"filename": "README.md", "patch": "+one line", "contents_url": "https://api.test/c/rm"},
+        {"filename": "styles.css", "patch": "+body {}", "contents_url": "https://api.test/c/css"},
     ]
     monkeypatch.setattr(client, "get_pull_request_files", lambda *a, **k: items)
 
+    fetched = []
+
     def fake_content(url):
-        assert url.endswith("/c/rm"), "must only fetch content for doc files"
-        return "# Full README\npip install x\nUsage: run it"
+        fetched.append(url)
+        return "FULL:" + url.rsplit("/", 1)[-1]
 
     monkeypatch.setattr(client, "get_content_by_url", fake_content)
     data = client.get_pull_request_data("octo", "repo", 7)
 
-    assert data["file_contents"]["README.md"] == "# Full README\npip install x\nUsage: run it"
-    assert data["file_contents"]["app.py"] == "+x = 1"  # code files keep patch text
-    assert data["code"] == "x = 1\none line"  # added-line assembly unchanged
+    assert data["file_contents"]["README.md"] == "FULL:rm"
+    assert data["file_contents"]["app.py"] == "FULL:app"
+    assert data["file_contents"]["styles.css"] == "+body {}"  # patch text is enough
+    assert sorted(fetched) == ["https://api.test/c/app", "https://api.test/c/rm"]
 
 
 def test_get_pull_request_data_doc_fetch_failure_falls_back_to_patch(monkeypatch):

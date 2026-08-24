@@ -540,3 +540,82 @@ def test_docs_only_pr_is_still_reviewed(monkeypatch, capsys):
     assert not any(key.startswith("sentinel_reviews_skipped_total") for key in counters)
 
     assert "PR #21 Risk: LOW" in capsys.readouterr().out
+
+
+# --- M11: AST security analysis takes over the files it can parse ---
+
+
+_MODULE_WITH_SECRET = (
+    '"""Service module."""\n'          # 1
+    "import os\n"                      # 2
+    "\n"                               # 3
+    "\n"                               # 4
+    "def connect(host):\n"             # 5
+    '    password = "hunter2"\n'       # 6  <- planted, and added by the PR
+    "    return (host, password)\n"    # 7
+)
+
+
+def test_ast_findings_carry_the_real_file_and_line():
+    """The whole point: a finding located in the file, not in a diff blob."""
+    job = {
+        "file_contents": {"svc.py": _MODULE_WITH_SECRET},
+        "line_map": [("svc.py", 6)],
+        "code": '    password = "hunter2"',
+    }
+    findings = BackgroundWorker._ast_security_findings(job)
+
+    assert [f.rule for f in findings] == ["hardcoded_secret"]
+    assert findings[0].file == "svc.py"
+    assert findings[0].line == 6
+    assert job["ast_covered_files"] == ["svc.py"]
+
+
+def test_ast_ignores_problems_the_pr_did_not_touch():
+    """The analyzer sees the whole module; the review is only about this PR."""
+    job = {
+        "file_contents": {"svc.py": _MODULE_WITH_SECRET},
+        "line_map": [("svc.py", 7)],  # the PR added line 7, not the secret on line 6
+        "code": "    return (host, password)",
+    }
+    assert BackgroundWorker._ast_security_findings(job) == []
+
+
+def test_ast_covered_files_are_withheld_from_the_regex_blob():
+    """Two engines, one line each — never both on the same line."""
+    job = {
+        "file_contents": {"svc.py": _MODULE_WITH_SECRET},
+        "line_map": [("svc.py", 6), ("other.txt", 3)],
+        "code": '    password = "hunter2"\ntoken = "abc"',
+        "ast_covered_files": ["svc.py"],
+    }
+    BackgroundWorker._strip_ast_covered_lines(job)
+
+    assert job["code"] == 'token = "abc"'
+    assert job["line_map"] == [("other.txt", 3)]
+
+
+def test_unparseable_python_falls_back_to_the_regex_engine():
+    """A file that does not parse must not be silently skipped by both engines."""
+    job = {
+        "file_contents": {"broken.py": "def oops(:\n    pass\n"},
+        "line_map": [("broken.py", 1)],
+        "code": "def oops(:",
+    }
+    assert BackgroundWorker._ast_security_findings(job) == []
+    assert "ast_covered_files" not in job
+
+    BackgroundWorker._strip_ast_covered_lines(job)
+    assert job["code"] == "def oops(:", "the blob must be left for regex to handle"
+
+
+def test_strip_is_a_no_op_when_blob_and_map_disagree():
+    """Corrupting index-parallel structures is worse than leaving them alone."""
+    job = {
+        "code": "a\nb\nc",
+        "line_map": [("x.py", 1)],
+        "ast_covered_files": ["x.py"],
+    }
+    BackgroundWorker._strip_ast_covered_lines(job)
+    assert job["code"] == "a\nb\nc"
+    assert job["line_map"] == [("x.py", 1)]

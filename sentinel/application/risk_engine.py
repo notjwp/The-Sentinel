@@ -80,6 +80,7 @@ class RiskEngine:
         *,
         resilient: bool,
         warn_threshold_seconds: float | None = None,
+        extra_security_findings: list | None = None,
     ) -> dict:
         """The single assessment implementation behind assess/assess_resilient.
 
@@ -97,6 +98,14 @@ class RiskEngine:
             "Security", lambda: self.security_service.analyze(code),
             lambda: {"findings": [], "severity": SeverityLevel.LOW}, resilient=resilient,
         )
+        # AST findings are produced per-file by the caller (which alone knows
+        # which files had parseable full source) and merged here so severity is
+        # still aggregated in exactly one place.
+        if extra_security_findings:
+            security_result = {
+                **security_result,
+                "findings": [*security_result.get("findings", []), *extra_security_findings],
+            }
 
         semantic_findings: list = []
         if self.semantic_service and code.strip():
@@ -142,11 +151,13 @@ class RiskEngine:
         existing_code_list: list[str] | None = None,
         *,
         warn_threshold_seconds: float = 0.1,
+        extra_security_findings: list | None = None,
     ) -> dict:
         """Engine failures degrade to safe defaults. Use for background work."""
         return self._assess(
             code, existing_code_list,
             resilient=True, warn_threshold_seconds=warn_threshold_seconds,
+            extra_security_findings=extra_security_findings,
         )
 
     def assess(self, code: str = "", existing_code_list: list[str] | None = None) -> dict:
