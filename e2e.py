@@ -42,6 +42,7 @@ Options:
 """
 
 import argparse
+import ast
 import hashlib
 import hmac
 import json
@@ -59,6 +60,7 @@ sys.path.insert(0, str(ROOT))
 
 from sentinel.application.risk_engine import RiskEngine  # noqa: E402
 from sentinel.config.settings import get_settings  # noqa: E402
+from sentinel.domain.services.ast_security_service import ASTSecurityService  # noqa: E402
 from sentinel.infrastructure.github.github_client import GitHubClient  # noqa: E402
 
 BASE_URL = "http://localhost:8000"
@@ -152,16 +154,32 @@ def trigger(secret: bytes, repo: str, pr: int) -> str:
 def predict(snippet: str) -> tuple[str, set[str]]:
     """What the engines say about this text — the expectation, computed not declared.
 
-    Runs the same RiskEngine the worker runs. Semantic analysis is absent here
-    (no corpus locally), so the deployed service may legitimately report a
-    HIGHER severity than this; the assertions account for that.
+    Both engines are consulted because either may handle the file: the deployed
+    service uses AST analysis for .py files whose full source parses and the
+    regex engine otherwise, and the two name their rules differently
+    (`hardcoded_secret` vs `password_assignment`). The returned rule set is the
+    union of what either could report, and the severity is the LOWER of the two
+    so the assertion holds whichever engine ends up doing the work.
+
+    Semantic analysis is absent here (no corpus locally), so the deployed
+    service may also report a higher severity than this.
     """
-    result = RiskEngine().assess(code=snippet)
-    severity = result["severity"]
-    return (
-        severity.value if hasattr(severity, "value") else str(severity),
-        {f.rule for f in result["security"]["findings"]},
-    )
+    regex_result = RiskEngine().assess(code=snippet)
+    severity = regex_result["severity"]
+    regex_severity = severity.value if hasattr(severity, "value") else str(severity)
+    rules = {f.rule for f in regex_result["security"]["findings"]}
+
+    severities = [regex_severity]
+    ast_findings = ASTSecurityService().analyze_source(snippet, "snippet.py")
+    if ast_findings is not None:
+        rules |= {f.rule for f in ast_findings}
+        if ast_findings:
+            severities.append(
+                max((f.severity.value for f in ast_findings),
+                    key=SEVERITY_ORDER.index)
+            )
+
+    return min(severities, key=SEVERITY_ORDER.index), rules
 
 
 def require_length(path: pathlib.Path, workdir: pathlib.Path) -> None:
@@ -201,25 +219,62 @@ def pick_file(workdir: pathlib.Path) -> pathlib.Path:
     return best
 
 
-def plant(path: pathlib.Path, snippet: str) -> tuple[int, int]:
-    """Insert snippet near the middle of the file. Returns (first, last), 1-based.
-
-    Indentation is copied from the nearest preceding non-blank line so the result
-    stays plausible in whatever language the file is written in.
-    """
-    lines = path.read_text(encoding="utf-8").split("\n")
-    at = max(1, len(lines) // 2)
-
+def _indent_for(lines: list[str], at: int) -> str:
+    """Indentation that keeps an insertion at `at` syntactically plausible."""
     probe = at
     while probe > 0 and not lines[probe - 1].strip():
         probe -= 1
     previous = lines[probe - 1] if probe > 0 else ""
     indent = previous[: len(previous) - len(previous.lstrip())]
+    # A line ending in ':' opens a block, so the next line must go one level
+    # deeper. Copying the header's own indent produces an IndentationError.
+    if previous.rstrip().endswith(":"):
+        indent += "    "
+    return indent
 
-    payload_lines = [indent + line for line in snippet.split("\n")]
-    lines[at:at] = payload_lines
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return at + 1, at + len(payload_lines)
+
+def plant(path: pathlib.Path, snippet: str) -> tuple[int, int]:
+    """Insert snippet near the middle of the file. Returns (first, last), 1-based.
+
+    For Python targets the result is verified to parse, trying insertion points
+    outward from the midpoint until one works. This matters more than it looks:
+    an unparseable file silently disqualifies itself from AST analysis, so a
+    careless planter would quietly test only the regex engine and report a pass.
+    """
+    original = path.read_text(encoding="utf-8").split("\n")
+    is_python = path.suffix.lower() == ".py"
+    midpoint = max(1, len(original) // 2)
+
+    # Walk outward from the midpoint: midpoint, +1, -1, +2, -2, ...
+    offsets = [0]
+    for step in range(1, len(original)):
+        offsets.extend([step, -step])
+
+    for offset in offsets:
+        at = midpoint + offset
+        if not 1 <= at <= len(original):
+            continue
+        candidate = list(original)
+        payload_lines = [
+            (_indent_for(original, at) + line) if line.strip() else line
+            for line in snippet.split("\n")
+        ]
+        candidate[at:at] = payload_lines
+        text = "\n".join(candidate)
+
+        if is_python:
+            try:
+                ast.parse(text)
+            except SyntaxError:
+                continue  # this spot breaks the file; try the next
+
+        path.write_text(text, encoding="utf-8")
+        return at + 1, at + len(payload_lines)
+
+    raise SystemExit(
+        f"could not plant into {path.name} without breaking its syntax; "
+        "try --file with a different target"
+    )
 
 
 def resolve_payload(args) -> str:
@@ -403,9 +458,14 @@ def main() -> int:
                     f"annotations on {sorted(hit_lines)}, expected within {expected_lines} "
                     "— hunk arithmetic may be wrong"
                 )
-            missing = expected_rules - hit_rules
-            if missing:
-                failures.append(f"rules predicted but not annotated: {sorted(missing)}")
+            # Either engine may have handled the file, so require an overlap
+            # rather than containment — demanding every predicted rule would
+            # fail simply because the other engine did the work.
+            if expected_rules and not (hit_rules & expected_rules):
+                failures.append(
+                    f"none of the predicted rules fired; predicted {sorted(expected_rules)}, "
+                    f"got {sorted(hit_rules)}"
+                )
 
     enriched = "Potential security issue detected" not in body
     say(4, f"LLM enrichment  ->  {'real explanations' if enriched else 'FALLBACK (check the API key)'}")
@@ -420,7 +480,11 @@ def main() -> int:
         run(["git", "push", "-q", "origin", "--delete", branch], cwd=workdir, check=False)
         run(["git", "branch", "-qD", branch], cwd=workdir, check=False)
     elif branch:
-        say(5, f"left open: PR #{pr_number}, branch {branch}")
+        # Return the local clone to main even when keeping the PR: leaving it on
+        # the planted branch means the NEXT run plants on top of this one's edit,
+        # which is how a previous session ended up with an unparseable fixture.
+        run(["git", "checkout", "-q", "main"], cwd=workdir, check=False)
+        say(5, f"left open: PR #{pr_number}, branch {branch} (local clone back on main)")
 
     if args.down:
         say(5, "stopping the stack")
