@@ -372,11 +372,19 @@ def main() -> int:
         except ValueError:
             failures.append(f"unrecognized risk value {risk!r}")
 
-    runs = gh._http_json("GET", f"{api}/repos/{owner}/{name}/commits/{head_sha}/check-runs",
-                         headers=gh._token_headers(token)) or {}
-    ours = [r for r in runs.get("check_runs", []) if r.get("name") == GitHubClient.CHECK_RUN_NAME]
+    def sentinel_check_runs():
+        runs = gh._http_json("GET", f"{api}/repos/{owner}/{name}/commits/{head_sha}/check-runs",
+                             headers=gh._token_headers(token)) or {}
+        return [r for r in runs.get("check_runs", [])
+                if r.get("name") == GitHubClient.CHECK_RUN_NAME] or None
+
+    # The worker posts the comment first and the check run immediately after, so
+    # the comment appearing does not mean the run has. Poll rather than assume —
+    # otherwise this races the second POST and reports a failure Sentinel didn't
+    # commit.
+    ours = wait_for(sentinel_check_runs, timeout=60, interval=1.5) or []
     if not ours:
-        failures.append("no Sentinel check run found")
+        failures.append("no Sentinel check run found (waited 60s after the comment)")
     for r in ours:
         say(4, f"check run       ->  {r.get('conclusion')}  ({(r.get('output') or {}).get('title')})")
         anns = gh._http_json_list(
