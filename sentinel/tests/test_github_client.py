@@ -989,3 +989,88 @@ def test_list_endpoint_distinguishes_empty_body_from_failure(monkeypatch):
 
     _urlopen_sequence(monkeypatch, [b'{"not": "a list"}'])
     assert _client()._http_json_list("GET", "https://api.github.com/x", headers={}) is None
+
+
+# --- Corpus relevance ranking (M10 Tier 4) ---
+
+
+def test_corpus_noise_paths_are_excluded():
+    """Test bodies repeat by nature and vendored trees aren't ours."""
+    for path in ("tests/test_x.py", "app/test_helpers.py", "app/helpers_test.py",
+                 "vendor/lib/x.py", "node_modules/pkg/y.py", "db/migrations/0001.py",
+                 "build/gen.py", "a/__pycache__/z.py"):
+        assert GitHubClient._is_corpus_noise(path), path
+    for path in ("app/billing.py", "sentinel/domain/services/debt_service.py", "main.py",
+                 "app/latest.py"):
+        assert not GitHubClient._is_corpus_noise(path), path
+
+
+def test_corpus_relevance_prefers_the_same_directory_then_package():
+    changed = ["sentinel/domain/services/debt_service.py"]
+    same_dir = GitHubClient._corpus_relevance("sentinel/domain/services/security_service.py", changed)
+    same_top = GitHubClient._corpus_relevance("sentinel/api/webhook_controller.py", changed)
+    unrelated = GitHubClient._corpus_relevance("scripts/tool.py", changed)
+    assert same_dir > same_top > unrelated
+    assert unrelated == 0
+
+
+def test_corpus_relevance_is_neutral_without_a_preference():
+    assert GitHubClient._corpus_relevance("any/path.py", None) == 0
+    assert GitHubClient._corpus_relevance("any/path.py", []) == 0
+
+
+def test_corpus_ranks_by_relevance_before_truncating(monkeypatch):
+    """The point of ranking: a fixed budget spent on the PR's neighbours.
+
+    Tree order would have taken the first CORPUS_MAX_FILES alphabetically,
+    which is unrelated to what the PR touched.
+    """
+    tree = {"tree": [
+        {"type": "blob", "path": f"aaa/filler_{i}.py", "sha": f"filler{i}", "size": 10}
+        for i in range(GitHubClient.CORPUS_MAX_FILES)
+    ] + [
+        {"type": "blob", "path": "zzz/target.py", "sha": "target", "size": 10},
+        {"type": "blob", "path": "zzz/tests/test_target.py", "sha": "noise", "size": 10},
+    ]}
+    fetched: list[str] = []
+
+    def fake_http_json(method, url, headers, data=None):
+        if "git/trees" in url:
+            return tree
+        fetched.append(url.rsplit("/", 1)[-1])
+        return {"encoding": "base64", "content": base64.b64encode(b"x = 1").decode()}
+
+    client = _client()
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "tok")
+    monkeypatch.setattr(client, "_http_json", fake_http_json)
+
+    client.get_repo_code_corpus("o", "r", "sha", prefer_paths=["zzz/changed.py"])
+
+    assert "target" in fetched, "the PR's own directory must make the cut"
+    assert "noise" not in fetched, "test files must be excluded"
+
+
+def test_corpus_cache_is_keyed_by_preference(monkeypatch):
+    """Same ref, different PR -> different ranking, so the ref alone can't be the key."""
+    tree = {"tree": [
+        {"type": "blob", "path": "a/one.py", "sha": "one", "size": 10},
+        {"type": "blob", "path": "b/two.py", "sha": "two", "size": 10},
+    ]}
+    calls = {"n": 0}
+
+    def fake_http_json(method, url, headers, data=None):
+        if "git/trees" in url:
+            return tree
+        calls["n"] += 1
+        return {"encoding": "base64", "content": base64.b64encode(b"x = 1").decode()}
+
+    client = _client()
+    monkeypatch.setattr(client, "_get_installation_token", lambda: "tok")
+    monkeypatch.setattr(client, "_http_json", fake_http_json)
+
+    client.get_repo_code_corpus("o", "r", "sha", prefer_paths=["a/x.py"])
+    first = calls["n"]
+    client.get_repo_code_corpus("o", "r", "sha", prefer_paths=["a/x.py"])
+    assert calls["n"] == first, "identical preference should hit the cache"
+    client.get_repo_code_corpus("o", "r", "sha", prefer_paths=["b/y.py"])
+    assert calls["n"] > first, "a different preference must not reuse the cache"

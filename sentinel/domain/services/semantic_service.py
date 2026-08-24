@@ -67,28 +67,55 @@ class SemanticService:
     def detect_duplicates(
         self, new_code: str, existing_code_list: list[str]
     ) -> list[Finding]:
+        """Find PR units that duplicate an existing unit.
+
+        Both sides are chunked. Comparing the WHOLE PR against each corpus unit
+        — the pre-M10 behavior — only fired when the PR was roughly the size and
+        shape of one existing unit: a single copied function inside a larger PR
+        was diluted by everything around it and scored far below the threshold.
+        Chunking the PR too is what makes function-level detection possible.
+
+        Cost is len(new) x len(corpus) cosine comparisons, but only
+        len(new) + len(corpus) embeddings: each side is embedded once and reused,
+        where the old loop re-embedded every corpus entry on every call. Both
+        sides are already bounded upstream (CORPUS_MAX_UNITS, max_units).
+        """
         if not new_code.strip() or not existing_code_list:
             return []
 
-        new_tokens = self.tokenize_code(new_code)
-        new_embedding = self.generate_embedding(new_tokens)
+        new_units = self.chunk_code_units(new_code) or [new_code]
+        new_embeddings = [
+            (unit, self.generate_embedding(self.tokenize_code(unit)))
+            for unit in new_units
+            if unit.strip()
+        ]
+        existing_embeddings = [
+            (unit, self.generate_embedding(self.tokenize_code(unit)))
+            for unit in existing_code_list
+            if isinstance(unit, str) and unit.strip()
+        ]
+        if not new_embeddings or not existing_embeddings:
+            return []
+
         findings: list[Finding] = []
+        for _, new_embedding in new_embeddings:
+            # One finding per PR unit: report only its closest match, so a unit
+            # resembling five near-identical corpus entries does not produce five
+            # findings for one problem.
+            best_unit, best_score = None, 0.0
+            for existing_code, existing_embedding in existing_embeddings:
+                similarity = self.compute_similarity(new_embedding, existing_embedding)
+                if similarity > best_score:
+                    best_unit, best_score = existing_code, similarity
 
-        for existing_code in existing_code_list:
-            if not existing_code.strip():
-                continue
-            existing_tokens = self.tokenize_code(existing_code)
-            existing_embedding = self.generate_embedding(existing_tokens)
-            similarity = self.compute_similarity(new_embedding, existing_embedding)
-
-            if similarity > self.SIMILARITY_THRESHOLD:
+            if best_unit is not None and best_score > self.SIMILARITY_THRESHOLD:
                 findings.append(
                     Finding(
                         rule="semantic_duplicate",
-                        match=existing_code[:100],
+                        match=best_unit[:100],
                         severity=SeverityLevel.HIGH,
                         finding_type="semantic",
-                        similarity_score=round(similarity, 4),
+                        similarity_score=round(best_score, 4),
                     )
                 )
 

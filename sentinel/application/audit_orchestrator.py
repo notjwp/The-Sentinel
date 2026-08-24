@@ -329,6 +329,27 @@ class AuditOrchestrator:
         }
 
         selected_languages = languages or ["Hindi", "Kannada"]
+
+        # Translation shares LLM_MAX_CALLS with enrichment, which runs first and
+        # spends the budget. At the default of 1 that means translations never
+        # run — and used to do so in complete silence, looking like a broken
+        # feature rather than a configuration consequence. Say so instead, and
+        # say exactly what value would fix it.
+        # Only a service that actually reports a budget can be judged against
+        # one; a stand-in without these attributes proceeds as before.
+        spent = getattr(self.llm_service, "call_count", None)
+        budget = getattr(self.llm_service, "max_calls", None)
+        if isinstance(spent, int) and isinstance(budget, int) and budget - spent < 1:
+            logger.warning(
+                "ENABLE_TRANSLATION is on but the LLM budget is spent "
+                "(LLM_MAX_CALLS=%s, already used=%s); skipping all translations. "
+                "Set LLM_MAX_CALLS to at least %s — 1 for enrichment plus 1 per language.",
+                budget,
+                spent,
+                spent + len(selected_languages),
+            )
+            return report
+
         translated_sections: list[str] = []
 
         for language in selected_languages:

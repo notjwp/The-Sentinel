@@ -250,15 +250,21 @@ def test_detect_duplicates_whitespace_in_existing_list_skipped():
     assert findings == []
 
 
-def test_detect_duplicates_multiple_duplicates():
+def test_one_finding_per_duplicated_unit_not_per_corpus_match():
+    """A unit matching several near-identical corpus entries is ONE problem.
+
+    Pre-M10 this reported a finding per (unit, corpus entry) pair, so a corpus
+    containing five variants of the same helper produced five findings for a
+    single copied function. Only the closest match is reported now.
+    """
     svc = _service()
     findings = svc.detect_duplicates(
         IDENTICAL_CODE,
         [IDENTICAL_CODE, RENAMED_VARS_CHANGED],
     )
-    assert len(findings) == 2
-    assert all(f.severity == SeverityLevel.HIGH for f in findings)
-    assert all(f.finding_type == "semantic" for f in findings)
+    assert len(findings) == 1
+    assert findings[0].severity == SeverityLevel.HIGH
+    assert findings[0].finding_type == "semantic"
 
 
 def test_detect_duplicates_mixed_matches_and_non_matches():

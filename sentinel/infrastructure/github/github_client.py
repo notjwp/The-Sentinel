@@ -63,7 +63,7 @@ class GitHubClient:
         self._installation_token_expiry: float = 0.0
         # Corpus per (owner, repo, ref); a ref pins content, so entries never go
         # stale — capacity-bounded only (plain dict keeps insertion order).
-        self._corpus_cache: dict[tuple[str, str, str], list[str]] = {}
+        self._corpus_cache: dict[tuple[str, str, str, str], list[str]] = {}
 
     @staticmethod
     def _now() -> float:
@@ -535,7 +535,52 @@ class GitHubClient:
         response = self._http_json("GET", contents_url, headers=self._token_headers(token))
         return self._decode_content_response(response)
 
-    def get_repo_code_corpus(self, owner: str, repo: str, ref: str) -> list[str]:
+    # Paths whose contents say nothing useful about duplication in application
+    # code: test bodies repeat by nature, and vendored trees are not ours.
+    CORPUS_NOISE_SEGMENTS = (
+        "test", "tests", "vendor", "vendored", "third_party", "node_modules",
+        "migrations", "site-packages", "build", "dist", "__pycache__",
+    )
+
+    @classmethod
+    def _is_corpus_noise(cls, path: str) -> bool:
+        segments = path.replace("\\", "/").lower().split("/")
+        if any(segment in cls.CORPUS_NOISE_SEGMENTS for segment in segments[:-1]):
+            return True
+        filename = segments[-1]
+        return filename.startswith("test_") or filename.endswith("_test.py")
+
+    @staticmethod
+    def _corpus_relevance(path: str, prefer_paths: list[str] | None) -> int:
+        """How likely this file is to be what the PR duplicated.
+
+        Proximity is the whole heuristic: code is most often copied from a
+        neighbour. Same directory scores highest, same top-level package next,
+        everything else zero — which still keeps a sensible corpus when the PR's
+        own paths are unknown.
+        """
+        if not prefer_paths:
+            return 0
+        normalized = path.replace("\\", "/")
+        directory = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
+        top = normalized.split("/", 1)[0] if "/" in normalized else ""
+
+        score = 0
+        for changed in prefer_paths:
+            if not isinstance(changed, str) or not changed:
+                continue
+            changed = changed.replace("\\", "/")
+            changed_dir = changed.rsplit("/", 1)[0] if "/" in changed else ""
+            changed_top = changed.split("/", 1)[0] if "/" in changed else ""
+            if directory and directory == changed_dir:
+                return 2  # same directory — nothing beats this
+            if top and top == changed_top:
+                score = max(score, 1)
+        return score
+
+    def get_repo_code_corpus(
+        self, owner: str, repo: str, ref: str, prefer_paths: list[str] | None = None
+    ) -> list[str]:
         """Fetch the repo's Python sources at a ref (the semantic-duplicate corpus).
 
         Bounded (CORPUS_MAX_FILES / CORPUS_MAX_FILE_BYTES) and failure-safe:
@@ -545,7 +590,11 @@ class GitHubClient:
         if not owner or not repo or not ref:
             return []
 
-        cache_key = (owner, repo, ref)
+        # prefer_paths is part of the key: the same ref yields a different
+        # corpus for a PR touching a different directory, so keying on the ref
+        # alone would serve one PR's ranking to the next.
+        preference = ",".join(sorted(p for p in (prefer_paths or []) if isinstance(p, str)))
+        cache_key = (owner, repo, ref, preference)
         cached = self._corpus_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -564,7 +613,7 @@ class GitHubClient:
         if not isinstance(tree, list):
             return []
 
-        blob_shas: list[str] = []
+        candidates: list[tuple[int, str, str]] = []  # (-score, path, sha)
         for item in tree:
             if not isinstance(item, dict) or item.get("type") != "blob":
                 continue
@@ -577,9 +626,16 @@ class GitHubClient:
                 continue
             if isinstance(size, int) and size > self.CORPUS_MAX_FILE_BYTES:
                 continue
-            blob_shas.append(sha)
-            if len(blob_shas) >= self.CORPUS_MAX_FILES:
-                break
+            if self._is_corpus_noise(path):
+                continue
+            candidates.append((-self._corpus_relevance(path, prefer_paths), path, sha))
+
+        # Rank before truncating. Taking the first N in tree order meant the
+        # corpus was whatever sorted earliest — often a directory of __init__.py
+        # files — regardless of what the PR touched. Sorting by relevance first
+        # spends a fixed budget on the code the PR is most likely to duplicate.
+        candidates.sort()
+        blob_shas = [sha for _, _, sha in candidates[: self.CORPUS_MAX_FILES]]
 
         corpus: list[str] = []
         for sha in blob_shas:

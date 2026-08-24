@@ -259,7 +259,10 @@ class BackgroundWorker:
         base_sha = job.get("base_sha")
         if base_sha:
             try:
-                corpus_files = github_client.get_repo_code_corpus(owner, repo_name, base_sha)
+                # Rank the corpus toward what this PR actually touched.
+                corpus_files = github_client.get_repo_code_corpus(
+                    owner, repo_name, base_sha, prefer_paths=job.get("files")
+                )
                 chunks = [
                     chunk
                     for content in corpus_files

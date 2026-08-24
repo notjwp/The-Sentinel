@@ -56,11 +56,25 @@ def verify_startup_config(settings) -> None:
     )
 
 
+def warn_unreachable_config(settings) -> None:
+    """Flag settings that are switched on but cannot take effect as configured."""
+    # Enrichment spends the shared budget before translation is reached, so
+    # anything below 2 guarantees translations are skipped no matter what.
+    if settings.ENABLE_TRANSLATION and settings.LLM_MAX_CALLS < 2:
+        logger.warning(
+            "ENABLE_TRANSLATION is on but LLM_MAX_CALLS=%s — enrichment spends the "
+            "budget first, so translations will never run. Raise it to at least 3 "
+            "(1 enrichment + 1 per language).",
+            settings.LLM_MAX_CALLS,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     # Validate BEFORE starting the worker: raising afterwards would orphan its task.
     verify_startup_config(settings)
+    warn_unreachable_config(settings)
 
     logger.info("Starting background worker")
     app.state.worker_task = asyncio.create_task(background_worker.start())

@@ -61,8 +61,9 @@ class _FakeGitHub:
     def get_pull_request_refs(self, owner: str, repo: str, pr_number) -> dict:
         return {"head_sha": "head-sha", "base_sha": "base-sha"}
 
-    def get_repo_code_corpus(self, owner: str, repo: str, ref: str) -> list[str]:
+    def get_repo_code_corpus(self, owner: str, repo: str, ref: str, prefer_paths=None) -> list[str]:
         self.corpus_ref = ref
+        self.corpus_prefer_paths = prefer_paths
         return self._corpus
 
     def post_comment(self, owner: str, repo: str, pr_number, body: str) -> bool:
