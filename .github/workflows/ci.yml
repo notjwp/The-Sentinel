@@ -42,4 +42,4 @@ jobs:
           python-version: "3.13"
       - run: pip install ruff==0.15.21
       - name: Ruff
-        run: ruff check sentinel main.py
+        run: ruff check sentinel main.py e2e.py
